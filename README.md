@@ -1,85 +1,23 @@
-# InSilico BioSphere — Unified Docking + Redesign + ADME Studio
+# InSilico BioSphere — Unified In Silico Molecular Modeling Pipeline
 
-A single Streamlit application that walks you through a complete in-silico
-drug-design workflow against a single protein target:
+An integrated, open-source Streamlit platform engineered to automate small-molecule structural preparation, docking execution via AutoDock Vina, interactive interaction mapping, bioisosteric fragmentation analysis, and ADMET property evaluation into a single browser layout.
 
-## Workflow
+## 🧪 Unified Workflow System Archetype
 
-| Step | What happens |
-|------|--------------|
-| **1** | Load protein (PDB ID or upload) + Original ligand (SMILES or .pdb/.sdf) + Grid box |
-| **2** | Run AutoDock Vina docking on the **original** ligand → record best affinity |
-| **3** | Generate a redesigned ligand **library** by substituting functional groups (RDKit fragment cleaving) |
-| **4** | **User picks** any variant from the library → automatically re-dock it against the **same protein** with the **same grid box** |
-| **5** | **Comparative report**: side-by-side Best-Affinity, full binding-mode tables, bar chart, 3D pose viewer |
-| **6** | ADME comparison (Lipinski, TPSA, Volume, LogP, BBB, HIA, MP/BP, pKa) + IUPAC name + predicted FTIR + downloadable HTML report |
+| Processing Workspace | Target Vector Engineering Actions |
+| :--- | :--- |
+| **Phase 1: Baseline Physics Docking** | Downloads receptor profiles from the RCSB Protein Data Bank server. It automatically strips custom crystallographic matrices, extracts bound native compound coordinates ($HETATM$) to line up pocket boundaries, prepares inputs, and executes native AutoDock Vina tasks via a byte-stream progress interface. |
+| **Phase 2: Generative Redesign Studio** | Uses algorithmic fragment identification scripts to evaluate terminal connection points on phytochemical scaffolds, running automated substitution operations based on chemical structural family classifications. |
+| **Phase 3: ADMET Descriptor Analytics** | Evaluates the engineered derivatives side-by-side using Lipinski rules, Topological Polar Surface Area (TPSA), molecular volume, automated Cactus IUPAC translation lookups, simulated FTIR spectrum footprints, and exports consolidated research records. |
 
-## Files
-
-| File | Purpose |
-|------|---------|
-| `app.py` | The unified Streamlit application |
-| `requirements.txt` | Python (pip) packages |
-| `packages.txt` | System-level (apt) packages — **required for Streamlit Cloud** |
-| `README.md` | This file |
-
-## How to run
-
-### Locally
+## ⚙️ Installation & Ecosystem Deployment
 
 ```bash
+# Clone the repository workspace and navigate into directory
+cd insilico-biosphere-studio
+
+# Install standard dependencies
 pip install -r requirements.txt
+
+# Launch unified software engine dashboard
 streamlit run app.py
-```
-
-### On Streamlit Cloud
-
-1. Push the whole folder to a GitHub repo.
-2. On Streamlit Cloud, point it at `app.py` — it will auto-detect and install
-   both `requirements.txt` (Python) and `packages.txt` (system libs).
-
-The app auto-downloads the Linux AutoDock Vina 1.2.5 binary on first run, so
-it works out of the box on Streamlit Cloud or any Linux box with network
-access to GitHub.
-
-### Why `packages.txt` is needed
-
-Streamlit Cloud runs a slim Debian image. The Python wheels alone aren't
-enough — RDKit's `Draw.MolToImage` needs X11 rendering libs, and the Vina
-binary needs the C++ standard library. The `packages.txt` lists the apt
-packages that get installed **before** pip:
-
-- `libxrender1`, `libxext6`, `libsm6` — X11 libs required by RDKit's drawing
-  pipeline (Pillow / Cairo backends)
-- `libglib2.0-0` — GLib, pulled in by RDKit and matplotlib
-- `libstdc++6` — C++ runtime for the downloaded Vina binary
-
-## What changed vs. your three original scripts
-
-- The **docking** script and the **redesign + ADME** script are now one app
-  sharing session state (no copy-paste between tools).
-- The redesign library now **uses the original docking affinity as a baseline**
-  when predicting the Δ score of each variant.
-- A new **Step 4** lets the user pick any variant and **re-dock it against the
-  same receptor with the same grid box** — the missing comparative-docking step
-  you asked for.
-- A new **Step 5** shows side-by-side best-affinity metrics, a delta verdict,
-  a bar chart, both binding-mode tables, and a 3D pose viewer for the
-  redesigned ligand.
-- The downloadable HTML report now contains **both** docking runs, the ADME
-  comparison, IUPAC name, predicted FTIR, and the structural-shift narrative,
-  in a single document.
-
-## Notes
-
-- More-negative kcal/mol = stronger binding.
-- The same `exhaustiveness` and grid box are deliberately used for both dockings
-  so the comparison is apples-to-apples.
-- If the redesigned SMILES can't be embedded in 3D (rare — usually disconnected
-  co-crystal SMILES with a `.`), the app will tell you and you can pick another
-  variant.
-
----
-Developed by **Mr. Sarang S. Dhote**, Assistant Professor,
-Department of Chemistry, Shivaji Science College, Nagpur, India.
-Contact: sarangresearch@gmail.com
