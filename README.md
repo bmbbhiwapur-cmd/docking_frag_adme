@@ -14,16 +14,45 @@ drug-design workflow against a single protein target:
 | **5** | **Comparative report**: side-by-side Best-Affinity, full binding-mode tables, bar chart, 3D pose viewer |
 | **6** | ADME comparison (Lipinski, TPSA, Volume, LogP, BBB, HIA, MP/BP, pKa) + IUPAC name + predicted FTIR + downloadable HTML report |
 
+## Files
+
+| File | Purpose |
+|------|---------|
+| `app.py` | The unified Streamlit application |
+| `requirements.txt` | Python (pip) packages |
+| `packages.txt` | System-level (apt) packages — **required for Streamlit Cloud** |
+| `README.md` | This file |
+
 ## How to run
+
+### Locally
 
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
+### On Streamlit Cloud
+
+1. Push the whole folder to a GitHub repo.
+2. On Streamlit Cloud, point it at `app.py` — it will auto-detect and install
+   both `requirements.txt` (Python) and `packages.txt` (system libs).
+
 The app auto-downloads the Linux AutoDock Vina 1.2.5 binary on first run, so
 it works out of the box on Streamlit Cloud or any Linux box with network
 access to GitHub.
+
+### Why `packages.txt` is needed
+
+Streamlit Cloud runs a slim Debian image. The Python wheels alone aren't
+enough — RDKit's `Draw.MolToImage` needs X11 rendering libs, and the Vina
+binary needs the C++ standard library. The `packages.txt` lists the apt
+packages that get installed **before** pip:
+
+- `libxrender1`, `libxext6`, `libsm6` — X11 libs required by RDKit's drawing
+  pipeline (Pillow / Cairo backends)
+- `libglib2.0-0` — GLib, pulled in by RDKit and matplotlib
+- `libstdc++6` — C++ runtime for the downloaded Vina binary
 
 ## What changed vs. your three original scripts
 
