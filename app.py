@@ -699,8 +699,13 @@ with tab1:
                 with open(temp_in, "wb") as f: f.write(uploaded_lig_buffer.getbuffer())
                 mol = Chem.MolFromPDBFile(temp_in, removeHs=False) if uploaded_lig_name.endswith(".pdb") else Chem.SDMolSupplier(temp_in, removeHs=False)[0]
                 if mol:
-                    try: Chem.SanitizeMol(mol); AllChem.AssignBondOrdersFromTopology(mol)
-                    except: pass
+                    try: 
+                        Chem.SanitizeMol(mol)
+                        AllChem.AssignBondOrdersFromTopology(mol)
+                        extracted_smiles = Chem.MolToSmiles(Chem.RemoveHs(mol))
+                    except Exception: 
+                        extracted_smiles = Chem.MolToSmiles(mol) if mol else ""
+                        
                     if mol.GetNumConformers() == 0:
                         mol = Chem.AddHs(mol)
                         AllChem.EmbedMolecule(mol, AllChem.ETKDGv3())
@@ -709,7 +714,10 @@ with tab1:
                     Chem.MolToPDBFile(mol, temp_pdb)
                     convert_pdb_to_pdbqt(temp_pdb, "ligand.pdbqt", is_ligand=True)
                     st.session_state.ligand_ready = True
-                    st.session_state.smiles_cache = temp_in
+                    
+                    # Fix: Saving actual parsed SMILES so Redesign phase won't crash
+                    st.session_state.smiles_cache = extracted_smiles 
+                    
                     st.session_state.ligand_summary_text = "Ligand structure loaded successfully from uploaded file matrix."
                     with open("ligand.pdbqt", "r") as f: st.session_state.serialized_ligand_block = f.read()
                     if os.path.exists(temp_in): os.remove(temp_in)
@@ -795,17 +803,32 @@ with tab1:
                     
                     pose_affinity_score = get_pose_affinity(st.session_state.docking_results_raw, selected_pose)
                     
-                    # Capture best score globally for ADMET tracking
                     if selected_pose == 1 and pose_affinity_score != "N/A":
                         try: st.session_state.baseline_affinity = float(pose_affinity_score)
                         except ValueError: pass
 
                     active_interactions = compute_spatial_interactions("protein.pdbqt", parsed_poses[selected_pose])
                     
-                    if active_interactions:
-                        unique_residues = ", ".join(sorted(list(set([i["Residue Contact"] for i in active_interactions]))))
-                    else:
-                        unique_residues = "None detected within 3.8 Å threshold."
+                    # Sort interactions by amino acid chemical properties
+                    amino_acid_categories = {"Acidic (-ve)": [], "Basic (+ve)": [], "Polar (Neutral)": [], "Hydrophobic": []}
+                    for item in active_interactions:
+                        res_full = item["Residue Contact"]
+                        res_name = "".join([c for c in res_full if c.isalpha()]).upper()
+                        if res_name in ["ASP", "GLU"]: amino_acid_categories["Acidic (-ve)"].append(res_full)
+                        elif res_name in ["LYS", "ARG", "HIS"]: amino_acid_categories["Basic (+ve)"].append(res_full)
+                        elif res_name in ["SER", "THR", "ASN", "GLN", "CYS", "TYR"]: amino_acid_categories["Polar (Neutral)"].append(res_full)
+                        else: amino_acid_categories["Hydrophobic"].append(res_full)
+                    
+                    breakdown_html = ""
+                    report_breakdown_text = ""
+                    for cat_name, res_list in amino_acid_categories.items():
+                        if res_list:
+                            labels_joined = ", ".join(sorted(list(set(res_list))))
+                            breakdown_html += f"<p style='margin:4px 0; font-size:13px;'><b>{cat_name}:</b> <span style='color:#333;'>{labels_joined}</span></p>"
+                            report_breakdown_text += f"- {cat_name}: {labels_joined}\n"
+                    if not breakdown_html: 
+                        breakdown_html = "<p style='margin:4px 0; color:#777; font-size:13px;'>No pocket interactions detected.</p>"
+                        report_breakdown_text = "- No close contacts detected under 3.8 Angstroms.\n"
                     
                     try:
                         affinity_val = float(pose_affinity_score)
@@ -827,7 +850,7 @@ with tab1:
     
                     html_metric_card = f"""
                     <div style="background-color:{bg_color}; border-left:6px solid {border_color}; padding:16px; border-radius:8px; margin-bottom:15px; font-family:sans-serif;">
-                        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 12px;">
+                        <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #e0e8e4; padding-bottom:8px; margin-bottom:10px;">
                             <div>
                                 <span style="font-size:12px; color:#555; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px;">Active Pose Affinity</span><br>
                                 <span style="font-size:36px; font-weight:900; color:{affinity_color};">{affinity_label}</span>
@@ -837,9 +860,9 @@ with tab1:
                                 <span style="font-size:32px; font-weight:800; color:#333;">{len(active_interactions)}</span>
                             </div>
                         </div>
-                        <div style="border-top: 1px solid {border_color}; padding-top: 12px; opacity: 0.9;">
-                            <span style="font-size:12px; color:#555; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px;">Interacting Amino Acid Residues:</span><br>
-                            <span style="font-size:14px; font-weight:600; color:#333; word-wrap: break-word;">{unique_residues}</span>
+                        <div>
+                            <span style="font-size:11px; color:#666; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px; display:block; margin-bottom:4px;">Binding Site Amino Acid Properties Breakdown:</span>
+                            {breakdown_html}
                         </div>
                     </div>
                     """
@@ -852,6 +875,58 @@ with tab1:
                         surf_toggle = st.checkbox("Overlay Translucent Pocket Cavity Mesh", value=False)
                         
                     render_advanced_modeling_blueprint(receptor_data=protein_data, ligand_data=parsed_poses[selected_pose], mode=style_mode, show_surface=surf_toggle, interactions_list=active_interactions)
+                    
+                    # --- RESTORED COMPREHENSIVE REPORT MODULE ---
+                    st.write("---")
+                    st.subheader("📋 Comprehensive In Silico Screening Report")
+                    
+                    report_content = f"""=======================================================
+MOLECULAR DOCKING SCREENING ANALYSIS REPORT
+Generated dynamically via InSilico BioSphere Docking Tool
+Developed by: Dr. Sarang S. Dhote, Assistant Professor, Department of Chemistry, Shivaji Science College, Nagpur, India | Contact: sarangresearch@gmail.com
+=======================================================
+
+1. TARGET RECEPTOR MACROMOLECULE PROFILE
+-------------------------------------------------------
+- Target Configuration Identifier: {st.session_state.pdb_id_display}
+- Primary Structure Data Source: RCSB Protein Data Bank Server
+
+2. SMALL MOLECULE DRUG LIGAND PROFILE
+-------------------------------------------------------
+- Input Structural Identity Matrix (SMILES): {st.session_state.get('smiles_cache', 'Uploaded File Data Track')}
+- Compiled Chemical Attributes: {st.session_state.ligand_summary_text.replace('**','')}
+
+3. BOUND SPACE CONFIGURATION MECHANICS (GRID BOX)
+-------------------------------------------------------
+- Center Coordinates Vector (X, Y, Z): ({grid_cx}, {grid_cy}, {grid_cz})
+- Grid Bounding Dimensions (X, Y, Z): ({grid_sx} Å, {grid_sy} Å, {grid_sz} Å)
+- Search Algorithm Exhaustiveness Index: {exhaustiveness}
+
+4. ACTIVE POSE COMPLEX BINDING METRICS (SELECTED MODE)
+-------------------------------------------------------
+- Target Alignment Selection Mode: Mode {selected_pose} Pose Fit
+- Computed Gibbs Free Energy Affinity: {pose_affinity_score} kcal/mol
+- Measured Total Spatial Proximity Contact Atoms: {len(active_interactions)}
+
+5. POCKET CONTACT RESIDUES PROACTIVE BREAKDOWN
+-------------------------------------------------------
+{report_breakdown_text}
+=======================================================
+Report compiled successfully. Ready for manuscript citation.
+**InSilico BioSphere: An Integrated Platform for Automated Molecular Docking.**
+    Developed by Dr. Sarang S. Dhote, Assistant Professor, Department of Chemistry, 
+    Shivaji Science College, Nagpur, India.
+=======================================================
+"""
+                    st.text_area("Copy Code Summary Report Log Sheet Block directly:", value=report_content, height=320)
+                    
+                    # --- RESTORED MATRIX TABLE ---
+                    st.subheader("🧬 Local Contact Residues & Bond Assignments Matrix")
+                    if active_interactions:
+                        df_int = pd.DataFrame(active_interactions)
+                        st.dataframe(df_int[["Residue Contact", "Interaction Type", "Distance (Å)"]], hide_index=True, use_container_width=True)
+                    else:
+                        st.info("No close contacts detected within a 3.8 Å threshold radius.")
     
     # --- ENGINE EXECUTION ---
     if run_btn and can_dock:
@@ -952,11 +1027,18 @@ with tab1:
 # ---------------------------------------------------------------------
 with tab2:
     st.header("Generative Fragment Modification Matrix")
-    if not st.session_state.smiles_cache or st.session_state.smiles_cache.startswith("raw_ligand"):
-        st.warning("⚠️ Access Gated: Provide a valid pure SMILES sequence in Phase 1 to unlock the modification dashboard. (Redesign engine does not support raw .pdb uploads).")
+    
+    # Check if a valid SMILES exists (will work for both typed strings and uploaded parsed molecules)
+    if not st.session_state.smiles_cache:
+        st.warning("⚠️ Access Gated: Complete Baseline Structural Docking sequence in Phase 1 to unlock the modification dashboard.")
     else:
         cls_lbl, _ = get_dynamic_fragments(st.session_state.smiles_cache)
         st.info(f"🧬 **Automated AI Scaffold Family Classification Ident: `{cls_lbl}`**")
+        
+        # --- NEW SCIENTIFIC DISPLAY ADDITIONS ---
+        rec_id = st.session_state.pdb_id_display if st.session_state.pdb_id_display else "Local Structural Matrix"
+        st.markdown(f"> **Target Receptor Matrix (PDB ID):** `{rec_id}` <br> **Lead Drug Scaffold (SMILES):** `{st.session_state.smiles_cache}`", unsafe_allow_html=True)
+        st.markdown("*Scientific Execution Protocol: This module will now computationally redesign the primary structural architecture of the parent drug via bioisosteric substitution to optimize steric fit and explicitly improve the thermodynamic binding affinity (ΔG) within the target receptor pocket.*")
         
         v_sites = find_valid_cleavage_sites(st.session_state.smiles_cache)
         col_rd_p, col_rd_v = st.columns([1, 1])
