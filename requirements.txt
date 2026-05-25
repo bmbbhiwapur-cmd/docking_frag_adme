@@ -1,4 +1,0 @@
-streamlit>=1.30.0
-rdkit>=2023.09.1
-py3Dmol>=2.0.4
-biopython>=1.81
