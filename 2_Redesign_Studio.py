@@ -373,8 +373,14 @@ with col_params:
     ligand_mode = st.radio("Lead Input Setup:", ["Paste SMILES String", "Upload Small Molecule Data"])
     
     if ligand_mode == "Paste SMILES String":
-        default_smiles = "CC(=O)NC1=CC=C(O)C=C1" if "MockFrag" in engine_mode else ""
-        smiles_input = st.text_input("Parent Compound SMILES", value=default_smiles).strip()
+        # --- MEMORY LINK INJECTED HERE ---
+        # Grabs the SMILES sent from the Docking Engine. If none was sent, it defaults to the standard molecule.
+        default_fallback = "CC(=O)NC1=CC=C(O)C=C1" if "MockFrag" in engine_mode else ""
+        incoming_smiles = st.session_state.get("rd_parent_smiles", default_fallback)
+        
+        smiles_input = st.text_input("Parent Compound SMILES", value=incoming_smiles).strip()
+        # ---------------------------------
+        
         if st.button("📥 Send Phytochemical Scaffold Profile"):
             st.session_state.rd_parent_smiles = smiles_input
             st.session_state.rd_ligand = generate_pdb_string_from_smiles(smiles_input)
@@ -404,7 +410,6 @@ with col_params:
             
             if os.path.exists(temp_path):
                 os.remove(temp_path)
-
     if st.session_state.protein_parsed and st.session_state.ligand_parsed and st.session_state.rd_parent_smiles:
         st.write("---")
         st.header("3. Reaction Mechanism & Target Selection")
