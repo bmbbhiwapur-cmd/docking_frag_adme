@@ -748,3 +748,21 @@ if st.session_state.docking_results_raw is not None:
         with col_export:
             csv_data = df_results.to_csv(index=False).encode('utf-8')
             st.download_button(label="📥 Download Data Sheet (.CSV)", data=csv_data, file_name="screening_affinity_report.csv", mime="text/csv", use_container_width=True)
+            df_results = parse_vina_output_with_residues(st.session_state.docking_results_raw)
+    if not df_results.empty:
+        col_table, col_export = st.columns([2, 1])
+        with col_table: st.dataframe(df_results, hide_index=True, use_container_width=True)
+        with col_export:
+            csv_data = df_results.to_csv(index=False).encode('utf-8')
+            st.download_button(label="📥 Download Data Sheet (.CSV)", data=csv_data, file_name="screening_affinity_report.csv", mime="text/csv", use_container_width=True)
+            
+        # --- NEW PIPELINE TRANSITION BUTTON ---
+        st.write("---")
+        st.subheader("🧬 Post-Docking Analysis")
+        st.info("Does this ligand need optimization? Send it directly to the AI Redesign Studio to generate structural variants.")
+        
+        if st.button("🚀 Send to AI Redesign Studio", type="primary", use_container_width=True):
+            # Pass the SMILES string to the redesign page's memory
+            st.session_state.rd_parent_smiles = st.session_state.get("active_smiles", "CC(=O)NC1=CC=C(O)C=C1")
+            # Automatically switch the web interface to page 2
+            st.switch_page("pages/2_Redesign_Studio.py")
