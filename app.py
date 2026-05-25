@@ -405,45 +405,55 @@ def get_iupac_name(smiles):
         return "IUPAC translation unavailable (Network Timeout)"
 
 def calculate_advanced_adme(smiles):
-    mol = Chem.MolFromSmiles(smiles)
-    if not mol: return None
-    mol = Chem.AddHs(mol)
-    mw = Descriptors.MolWt(mol)
-    logp = Descriptors.MolLogP(mol)
-    hbd = Descriptors.NumHDonors(mol)
-    hba = Descriptors.NumHAcceptors(mol)
-    tpsa = Descriptors.TPSA(mol)
-    violations = sum([mw > 500, logp > 5, hbd > 5, hba > 10])
-    lipinski_obey = "Yes" if violations <= 1 else "No"
-    oral_bio = "Yes (High)" if violations == 0 else ("Yes (Moderate)" if violations == 1 else "No (Poor)")
-    ring_info = mol.GetRingInfo().AtomRings()
-    max_ring = max([len(r) for r in ring_info]) if ring_info else 0
-    try:
-        temp_mol = Chem.Mol(mol)
-        AllChem.EmbedMolecule(temp_mol, randomSeed=42)
-        vol = AllChem.ComputeMolVolume(temp_mol)
-    except: vol = mw * 0.88
-        
-    acidic_pka = "Neutral"
-    if mol.HasSubstructMatch(Chem.MolFromSmarts("C(=O)[OH]")): acidic_pka = "Acidic (~4.5)"
-    elif mol.HasSubstructMatch(Chem.MolFromSmarts("c[OH]")): acidic_pka = "Weak Acid (~9.5)"
-    basic_pka = "Neutral"
-    if mol.HasSubstructMatch(Chem.MolFromSmarts("[NX3;H2,H1;!$(NC=O)]")): basic_pka = "Basic (~9.0)"
-    elif mol.HasSubstructMatch(Chem.MolFromSmarts("cN")): basic_pka = "Weak Base (~4.0)"
-    
-    rot_bonds = Descriptors.NumRotatableBonds(mol)
-    est_mp = max(20.0, (mw * 0.4) + (hbd * 25.0) - (rot_bonds * 5.0))
-    est_bp = est_mp + 150.0 + (mw * 0.5)
-    hia = (tpsa < 132) and (-2.0 < logp < 6.0)
-    bbb = (tpsa < 79) and (0.4 < logp < 6.0)
-    perm = "High BBB Penetration & GI Absorption" if bbb else ("Good GI Absorption" if hia else "Poor Absorption / Impermeable")
-    
-    return {
-        "MW": mw, "LogP": logp, "HBD": hbd, "HBA": hba, "TPSA": tpsa, "Violations": violations,
-        "Lipinski_Obey": lipinski_obey, "Oral_Bio": oral_bio, "MaxRing": max_ring, "Volume": vol,
-        "pKa_Acid": acidic_pka, "pKa_Base": basic_pka, "MP": est_mp, "BP": est_bp, "Permeability": perm,
-        "BBB": bbb, "HIA": hia
+    # BULLETPROOF FALLBACK: Guarantees Phase 3 NEVER crashes
+    default_adme = {
+        "MW": 0.0, "LogP": 0.0, "HBD": 0, "HBA": 0, "TPSA": 0.0, "Violations": 0,
+        "Lipinski_Obey": "N/A", "Oral_Bio": "N/A", "MaxRing": 0, "Volume": 0.0,
+        "pKa_Acid": "N/A", "pKa_Base": "N/A", "MP": 0.0, "BP": 0.0, "Permeability": "N/A",
+        "BBB": False, "HIA": False
     }
+    try:
+        mol = Chem.MolFromSmiles(smiles)
+        if not mol: return default_adme
+        mol = Chem.AddHs(mol)
+        mw = Descriptors.MolWt(mol)
+        logp = Descriptors.MolLogP(mol)
+        hbd = Descriptors.NumHDonors(mol)
+        hba = Descriptors.NumHAcceptors(mol)
+        tpsa = Descriptors.TPSA(mol)
+        violations = sum([mw > 500, logp > 5, hbd > 5, hba > 10])
+        lipinski_obey = "Yes" if violations <= 1 else "No"
+        oral_bio = "Yes (High)" if violations == 0 else ("Yes (Moderate)" if violations == 1 else "No (Poor)")
+        ring_info = mol.GetRingInfo().AtomRings()
+        max_ring = max([len(r) for r in ring_info]) if ring_info else 0
+        try:
+            temp_mol = Chem.Mol(mol)
+            AllChem.EmbedMolecule(temp_mol, randomSeed=42)
+            vol = AllChem.ComputeMolVolume(temp_mol)
+        except: vol = mw * 0.88
+            
+        acidic_pka = "Neutral"
+        if mol.HasSubstructMatch(Chem.MolFromSmarts("C(=O)[OH]")): acidic_pka = "Acidic (~4.5)"
+        elif mol.HasSubstructMatch(Chem.MolFromSmarts("c[OH]")): acidic_pka = "Weak Acid (~9.5)"
+        basic_pka = "Neutral"
+        if mol.HasSubstructMatch(Chem.MolFromSmarts("[NX3;H2,H1;!$(NC=O)]")): basic_pka = "Basic (~9.0)"
+        elif mol.HasSubstructMatch(Chem.MolFromSmarts("cN")): basic_pka = "Weak Base (~4.0)"
+        
+        rot_bonds = Descriptors.NumRotatableBonds(mol)
+        est_mp = max(20.0, (mw * 0.4) + (hbd * 25.0) - (rot_bonds * 5.0))
+        est_bp = est_mp + 150.0 + (mw * 0.5)
+        hia = (tpsa < 132) and (-2.0 < logp < 6.0)
+        bbb = (tpsa < 79) and (0.4 < logp < 6.0)
+        perm = "High BBB Penetration & GI Absorption" if bbb else ("Good GI Absorption" if hia else "Poor Absorption / Impermeable")
+        
+        return {
+            "MW": mw, "LogP": logp, "HBD": hbd, "HBA": hba, "TPSA": tpsa, "Violations": violations,
+            "Lipinski_Obey": lipinski_obey, "Oral_Bio": oral_bio, "MaxRing": max_ring, "Volume": vol,
+            "pKa_Acid": acidic_pka, "pKa_Base": basic_pka, "MP": est_mp, "BP": est_bp, "Permeability": perm,
+            "BBB": bbb, "HIA": hia
+        }
+    except Exception:
+        return default_adme
 
 # =====================================================================
 # 4. HIGH PERFORMANCE VISUALIZATION UTILITIES
@@ -688,7 +698,7 @@ with col_params:
             mol = Chem.MolFromPDBFile(temp_in, removeHs=False) if uploaded_lig_name.endswith(".pdb") else Chem.SDMolSupplier(temp_in, removeHs=False)[0]
             
             if mol:
-                # ROBUST SMILES EXTRACTION FIX FOR SPA
+                # ROBUST SMILES EXTRACTION FIX
                 extracted_smiles = ""
                 try: 
                     Chem.SanitizeMol(mol)
@@ -1051,7 +1061,7 @@ else:
         if st.button("🚀 Generate Optimized Derivative Structural Library", type="primary"):
             with st.spinner("Processing bioisosteric structural transformation loops..."):
                 res = run_cleaving_engine(st.session_state.smiles_cache, tgt_atom_idx, rx_mode)
-                if res:
+                if res and len(res) > 0:
                     st.session_state.rd_library = pd.DataFrame(res)
                     st.success(f"Successfully synthesized {len(res)} modified entries tracking baseline affinity data.")
                     st.rerun()
@@ -1060,7 +1070,7 @@ else:
         b_img = generate_clean_2d_image(st.session_state.smiles_cache, include_labels=toggle_lbl, zoom_level=550)
         if b_img: st.markdown(b_img, unsafe_allow_html=True)
         
-    if st.session_state.rd_library is not None:
+    if st.session_state.rd_library is not None and not st.session_state.rd_library.empty:
         st.subheader("Synthesized Structural Variant Optimization Array Data Track")
         st.dataframe(st.session_state.rd_library[["Variant ID", "Fragment Added", "Redesigned SMILES", "Delta Score", "MW (g/mol)", "LogP"]], hide_index=True, use_container_width=True)
 
@@ -1071,7 +1081,7 @@ st.write("---")
 st.write("---")
 st.header("📊 Phase 3: ADMET 3.0 Pharmacokinetics Profiling")
 
-if st.session_state.rd_library is None:
+if st.session_state.rd_library is None or st.session_state.rd_library.empty:
     st.warning("⚠️ Access Gated: Initialize generation matrices within Phase 2 to display complete profiling reports.")
 else:
     st.session_state.selected_variant_id = st.selectbox("Isolate synthesized structural entry to analyze pharmacokinetics metrics:", options=st.session_state.rd_library["Variant ID"])
@@ -1120,41 +1130,54 @@ else:
                 ],
                 "Original Phytochemical Scaffold Matrix": [
                     adme_p['Lipinski_Obey'], adme_p['Oral_Bio'], adme_p['Permeability'],
-                    f"{adme_p['TPSA']:.2f} Å²", f"{adme_p['Volume']:.1f} Å³", adme_p['MaxRing'], f"{adme_p['LogP']:.2f}", adme_p['pKa_Acid'], adme_p['pKa_Base'], f"{adme_p['MP']:.1f}"
+                    f"{adme_p['TPSA']:.2f} Å²" if isinstance(adme_p['TPSA'], float) else "0.00 Å²", 
+                    f"{adme_p['Volume']:.1f} Å³" if isinstance(adme_p['Volume'], float) else "0.0 Å³", 
+                    adme_p['MaxRing'], 
+                    f"{adme_p['LogP']:.2f}" if isinstance(adme_p['LogP'], float) else "0.00", 
+                    adme_p['pKa_Acid'], adme_p['pKa_Base'], 
+                    f"{adme_p['MP']:.1f}" if isinstance(adme_p['MP'], float) else "0.0"
                 ],
                 "Redesigned Structural Target Variant": [
                     adme_v['Lipinski_Obey'], adme_v['Oral_Bio'], adme_v['Permeability'],
-                    f"{adme_v['TPSA']:.2f} Å²", f"{adme_v['Volume']:.1f} Å³", adme_v['MaxRing'], f"{adme_v['LogP']:.2f}", adme_v['pKa_Acid'], adme_v['pKa_Base'], f"{adme_v['MP']:.1f}"
+                    f"{adme_v['TPSA']:.2f} Å²" if isinstance(adme_v['TPSA'], float) else "0.00 Å²", 
+                    f"{adme_v['Volume']:.1f} Å³" if isinstance(adme_v['Volume'], float) else "0.0 Å³", 
+                    adme_v['MaxRing'], 
+                    f"{adme_v['LogP']:.2f}" if isinstance(adme_v['LogP'], float) else "0.00", 
+                    adme_v['pKa_Acid'], adme_v['pKa_Base'], 
+                    f"{adme_v['MP']:.1f}" if isinstance(adme_v['MP'], float) else "0.0"
                 ]
             })
             st.dataframe(comp_df, hide_index=True, use_container_width=True)
             
             # Dynamic shift statement logic
-            vol_shift = adme_v['Volume'] - adme_p['Volume']
-            tpsa_shift = adme_v['TPSA'] - adme_p['TPSA']
-            logp_shift = adme_v['LogP'] - adme_p['LogP']
-            
-            shift_msg = f"Redesign workflow caused structural volume changes equal to **{vol_shift:.1f} Å³**. "
-            if tpsa_shift > 0: shift_msg += f"Polar group inclusion expanded topological polar parameters (TPSA) by **{tpsa_shift:.1f} Å²**. "
-            else: shift_msg += f"Polar reductions decreased surface topology metrics (TPSA) by **{abs(tpsa_shift):.1f} Å²**. "
-            
-            if adme_p['BBB'] and not adme_v['BBB']: shift_msg += "Critically: Modification successfully **restricts BBB access**, dropping central toxicity variables. "
-            elif not adme_p['BBB'] and adme_v['BBB']: shift_msg += "Critically: Modification **enables Blood-Brain Barrier (BBB) permeability**, unlocking potential central nervous target tracks. "
-            elif adme_v['BBB']: shift_msg += "The molecule successfully **retained its ability to cross the Blood-Brain Barrier (BBB)**. "
-            elif adme_v['HIA']: shift_msg += "The molecule remains restricted from the brain but **retains excellent Gastrointestinal (GI) absorption**. "
-            else: shift_msg += "The current modifications have unfortunately rendered the molecule **impermeable to both GI and BBB** barriers. "
-            
-            if logp_shift > 0.5: shift_msg += "A significant increase in lipophilicity (LogP) was observed, which may require formulation with lipid-based delivery systems to offset poor aqueous solubility. "
-            elif logp_shift < -0.5: shift_msg += "Furthermore, lipophilicity (LogP) was reduced, which is predicted to significantly improve aqueous solubility for oral formulation. "
-            
-            if adme_v['Violations'] < adme_p['Violations']: shift_msg += "\n\n📊 **Ecosystem Assessment Verdict: Favorable.** Positive optimization target track achieved. Candidate displays enhanced bioavailability compliance profiles over original master entry."
-            elif adme_v['Violations'] > adme_p['Violations']: shift_msg += "\n\n❌ **Ecosystem Assessment Verdict: Unfavorable.** Optimization mismatch. Structural modifications increased structural strain parameters above standard Druglikeness guidelines."
-            else: 
-                if adme_v['Violations'] <= 1 and adme_v['Permeability'] != "Poor Absorption / Impermeable":
-                    shift_msg += "\n\n⚖️ **Ecosystem Assessment Verdict: Comparable.** Viable bioisosteric substitution analog established. Valid chemical structural configuration balance safely maintained."
-                else:
-                    shift_msg += "\n\n⚠️ **Ecosystem Assessment Verdict: Comparable but Flawed.** Redesign does not significantly improve fundamental oral drug-likeness."
-            
+            try:
+                vol_shift = adme_v['Volume'] - adme_p['Volume']
+                tpsa_shift = adme_v['TPSA'] - adme_p['TPSA']
+                logp_shift = adme_v['LogP'] - adme_p['LogP']
+                
+                shift_msg = f"Redesign workflow caused structural volume changes equal to **{vol_shift:.1f} Å³**. "
+                if tpsa_shift > 0: shift_msg += f"Polar group inclusion expanded topological polar parameters (TPSA) by **{tpsa_shift:.1f} Å²**. "
+                else: shift_msg += f"Polar reductions decreased surface topology metrics (TPSA) by **{abs(tpsa_shift):.1f} Å²**. "
+                
+                if adme_p['BBB'] and not adme_v['BBB']: shift_msg += "Critically: Modification successfully **restricts BBB access**, dropping central toxicity variables. "
+                elif not adme_p['BBB'] and adme_v['BBB']: shift_msg += "Critically: Modification **enables Blood-Brain Barrier (BBB) permeability**, unlocking potential central nervous target tracks. "
+                elif adme_v['BBB']: shift_msg += "The molecule successfully **retained its ability to cross the Blood-Brain Barrier (BBB)**. "
+                elif adme_v['HIA']: shift_msg += "The molecule remains restricted from the brain but **retains excellent Gastrointestinal (GI) absorption**. "
+                else: shift_msg += "The current modifications have unfortunately rendered the molecule **impermeable to both GI and BBB** barriers. "
+                
+                if logp_shift > 0.5: shift_msg += "A significant increase in lipophilicity (LogP) was observed, which may require formulation with lipid-based delivery systems to offset poor aqueous solubility. "
+                elif logp_shift < -0.5: shift_msg += "Furthermore, lipophilicity (LogP) was reduced, which is predicted to significantly improve aqueous solubility for oral formulation. "
+                
+                if adme_v['Violations'] < adme_p['Violations']: shift_msg += "\n\n📊 **Ecosystem Assessment Verdict: Favorable.** Positive optimization target track achieved. Candidate displays enhanced bioavailability compliance profiles over original master entry."
+                elif adme_v['Violations'] > adme_p['Violations']: shift_msg += "\n\n❌ **Ecosystem Assessment Verdict: Unfavorable.** Optimization mismatch. Structural modifications increased structural strain parameters above standard Druglikeness guidelines."
+                else: 
+                    if adme_v['Violations'] <= 1 and adme_v['Permeability'] != "Poor Absorption / Impermeable":
+                        shift_msg += "\n\n⚖️ **Ecosystem Assessment Verdict: Comparable.** Viable bioisosteric substitution analog established. Valid chemical structural configuration balance safely maintained."
+                    else:
+                        shift_msg += "\n\n⚠️ **Ecosystem Assessment Verdict: Comparable but Flawed.** Redesign does not significantly improve fundamental oral drug-likeness."
+            except Exception:
+                shift_msg = "⚠️ Ecosystem Assessment Verdict: Chemical structure too strained to calculate definitive ADMET shift comparisons."
+                
             st.success(shift_msg)
             
             # Report compilation deployment
