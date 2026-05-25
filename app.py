@@ -213,15 +213,24 @@ def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt", is_ligand=Fals
         return True, output_pdbqt
     except Exception as e: return False, str(e)
 
+# --- CRITICAL FIX 1: BULLETPROOF SMILES EMBEDDING ---
 def convert_smiles_to_pdbqt(smiles_string, output_filename="ligand.pdbqt"):
     try:
         mol = Chem.MolFromSmiles(smiles_string)
         if mol is None: return False, "Invalid SMILES."
         mol = Chem.AddHs(mol)
-        # CRITICAL FIX 2: Safely embed 3D coords without crashing
-        res = AllChem.EmbedMolecule(mol, AllChem.ETKDGv3(), maxAttempts=10)
+        
+        # Robust 3D Embedding Algorithm
+        params = AllChem.ETKDGv3()
+        params.useRandomCoords = True
+        params.maxIterations = 1000
+        res = AllChem.EmbedMolecule(mol, params)
         if res != 0:
-            AllChem.EmbedMolecule(mol, useRandomCoords=True)
+            # Absolute fallback for complex tautomers/rings
+            res = AllChem.EmbedMolecule(mol, useRandomCoords=True)
+        if res != 0:
+            return False, "RDKit failed to generate 3D coordinates for this specific SMILES."
+            
         try:
             AllChem.MMFFOptimizeMolecule(mol)
         except: pass
@@ -445,7 +454,6 @@ def calculate_advanced_adme(smiles):
         ring_info = mol.GetRingInfo().AtomRings()
         max_ring = max([len(r) for r in ring_info]) if ring_info else 0
         
-        # --- CRITICAL FIX 3: BYPASS 3D EMBEDDING CRASH FOR DISCONNECTED MOLECULES ---
         # 3D Embedding disconnected salts immediately segfaults Streamlit. 
         # Using the standard 0.88 McGowan approximation guarantees 100% stability.
         vol = float(mw) * 0.88 
@@ -565,55 +573,147 @@ def render_advanced_modeling_blueprint(receptor_data, ligand_data, mode="cartoon
     """
     components.html(html_content, height=510)
 
-def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, shift_msg, f_img, v_2d, p_2d):
+
+# --- CRITICAL FIX 2: FULL APP PAGE INJECTED REPORT ---
+def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, shift_msg, f_img, v_2d, p_2d, 
+                                    smiles_cache, baseline_affinity, grid_params, df_results, df_int, 
+                                    receptor_data, ligand_pose_data, selected_pose):
+    
+    res_html = df_results.to_html(index=False, classes="dataframe table") if df_results is not None else "<p>No docking data.</p>"
+    int_html = df_int.to_html(index=False, classes="dataframe table") if df_int is not None and not df_int.empty else "<p>No close contacts detected.</p>"
+    
+    # Safely escape strings for JS injection
+    safe_rec = str(receptor_data).replace('`', '').replace('\\', '\\\\')
+    safe_lig = str(ligand_pose_data).replace('`', '').replace('\\', '\\\\')
+    
     return f"""
-    <!DOCTYPE html><html><head><meta charset="utf-8"><title>InSilico BioSphere Complete Report</title>
-    <style>
-        body {{ font-family: sans-serif; color: #333; margin:0; padding:0; background:#f4f6f9; }}
-        .banner {{ background: linear-gradient(135deg, #1e3c72, #2a5298); color:white; padding:30px; text-align:center; }}
-        .card {{ background: white; max-width: 900px; margin: 30px auto; padding: 30px; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }}
-        h2 {{ color:#1e3c72; border-bottom:2px solid #e2e8f0; padding-bottom:5px; }}
-        table {{ width:100%; border-collapse:collapse; margin:15px 0; font-size:13px; }}
-        th, td {{ border:1px solid #e2e8f0; padding:10px; text-align:left; }}
-        th {{ background:#f8fafc; color:#1e3c72; }}
-        .scandata {{ font-family:monospace; background:#f1f5f9; padding:5px; display:block; border-radius:4px; }}
-    </style></head><body>
-    <div class="banner">
-        <h2>🔬 InSilico BioSphere Consolidated Research Record</h2>
-        <p>Department of Chemistry, Shivaji Science College, Nagpur, India</p>
-    </div>
-    <div class="card">
-        <h2>1. Macromolecular Target Identity</h2>
-        <p><b>PDB Code/Source:</b> {meta['id']}<br><b>Title:</b> {meta['title']}<br><b>Method:</b> {meta['method']} ({meta['res']})</p>
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <title>InSilico BioSphere Complete Report</title>
+        <style>
+            body {{ font-family: 'Segoe UI', Arial, sans-serif; color: #333; line-height: 1.6; margin: 0; padding: 0; background-color: #f9f9fb; }}
+            .header-banner {{ background: linear-gradient(135deg, #1e3c72, #2a5298); color: white; padding: 25px; border-bottom: 5px solid #00c6ff; text-align: center; position: relative; }}
+            .header-banner h1 {{ margin: 0; font-size: 28px; letter-spacing: 1px; }}
+            .header-banner p {{ margin: 5px 0 0 0; font-size: 14px; opacity: 0.9; }}
+            .copyright-header {{ font-size: 11px; text-transform: uppercase; letter-spacing: 2px; color: rgba(255,255,255,0.7); margin-bottom: 10px; display: block; }}
+            .container {{ max-width: 1000px; margin: 30px auto; background: white; padding: 40px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); }}
+            h2 {{ color: #1e3c72; border-bottom: 2px solid #eef2f7; padding-bottom: 8px; margin-top: 35px; font-size: 20px; }}
+            h3 {{ color: #2a5298; font-size: 16px; margin-top: 20px; }}
+            .meta-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; background: #f4f7f6; padding: 20px; border-radius: 8px; }}
+            .meta-item {{ font-size: 14px; }}
+            .meta-item strong {{ color: #1e3c72; }}
+            .table-wrapper {{ overflow-x: auto; margin: 20px 0; border: 1px solid #e2e8f0; border-radius: 6px; box-shadow: 0 2px 5px rgba(0,0,0,0.02); }}
+            table {{ width: 100%; border-collapse: collapse; font-size: 13px; min-width: 600px; }}
+            th, td {{ border: 1px solid #e2e8f0; padding: 10px; text-align: left; }}
+            th {{ background-color: #f8fafc; color: #1e3c72; font-weight: 600; }}
+            .structure-box {{ display: flex; gap: 30px; margin: 20px 0; background: #fafafa; padding: 20px; border-radius: 8px; border: 1px solid #eef2f7; align-items: center; }}
+            .structure-img {{ background: white; padding: 10px; border: 1px solid #e2e8f0; border-radius: 6px; max-width: 320px; text-align: center; }}
+            .scandata {{ font-family: monospace; background: #f1f5f9; padding: 3px 6px; border-radius: 4px; font-size: 13px; word-break: break-all; }}
+            .summary-card {{ background-color: #ecfdf5; border-left: 5px solid #10b981; padding: 20px; border-radius: 6px; margin: 25px 0; color: #065f46; font-size: 14.5px; }}
+            footer {{ text-align: center; padding: 20px; font-size: 12px; color: #64748b; margin-top: 5px; border-top: 1px solid #e2e8f0; }}
+        </style>
+    </head>
+    <body>
+        <div class="header-banner">
+            <span class="copyright-header">copyright@sarang dhote</span>
+            <h1>🔬 InSilico BioSphere Complete Execution Report</h1>
+            <p>Department of Chemistry, Shivaji Science College, Nagpur, India</p>
+        </div>
         
-        <h2>2. Baseline Docking Properties</h2>
-        <p><b>Initial Phytochemical SMILES:</b> <span class="scandata">{st.session_state.smiles_cache}</span></p>
-        <p><b>Computed Baseline Affinity Score:</b> {st.session_state.baseline_affinity} kcal/mol</p>
-        
-        <h2>3. Optimization Engineering & Modifications</h2>
-        <p><b>Isolated Variant ID:</b> {variant_row['Variant ID']}<br><b>Appended Functional Group:</b> {variant_row['Fragment Added']}</p>
-        <p><b>System Redesigned SMILES Matrix:</b> <span class="scandata">{variant_row['Redesigned SMILES']}</span></p>
-        <p><b>Proposed Synthesis Mapping Vector:</b> {variant_row['Route']} ({variant_row['Yield Prediction']})</p>
-        
-        <h2>4. ADMET Drug-Likeness Matrix</h2>
-        <p><b>Nomenclature (IUPAC):</b> {iupac}</p>
-        <table>
-            <tr><th>Parameter Parameterized</th><th>Original Phytochemical Lead</th><th>Redesigned Variant Matrix</th></tr>
-            <tr><td>Obey Lipinski's Rule?</td><td>{adme_p['Lipinski_Obey']}</td><td>{adme_v['Lipinski_Obey']}</td></tr>
-            <tr><td>Oral Bioavailability Probability</td><td>{adme_p['Oral_Bio']}</td><td>{adme_v['Oral_Bio']}</td></tr>
-            <tr><td>Total Permeability Profile</td><td>{adme_p['Permeability']}</td><td>{adme_v['Permeability']}</td></tr>
-            <tr><td>TPSA (Å²)</td><td>{adme_p['TPSA']:.2f}</td><td>{adme_v['TPSA']:.2f}</td></tr>
-            <tr><td>Molecular Volume (Å³)</td><td>{adme_p['Volume']:.1f}</td><td>{adme_v['Volume']:.1f}</td></tr>
-            <tr><td>Lipophilicity Parameter (LogP)</td><td>{adme_p['LogP']:.2f}</td><td>{adme_v['LogP']:.2f}</td></tr>
-        </table>
-        <h3>Dynamic Assessment Narrative</h3>
-        <p style="background:#f0fdf4; color:#166534; padding:15px; border-left:4px solid #16a34a;">{shift_msg}</p>
-        
-        <h2>5. Vibrational Fingerprint Footprint (FTIR Spectrum)</h2>
-        <div style="text-align:center;"><img src="data:image/png;base64,{f_img}" style="max-width:100%; border-radius:6px;"/></div>
-    </div>
-    <div style="text-align:center; padding:20px; color:#64748b; font-size:11px;">System Pipeline Core Development © Dr. Sarang S. Dhote (TLCS)</div>
-    </body></html>
+        <div class="container">
+            <h2>1. Baseline Docking Configuration & Target Matrix</h2>
+            <div class="meta-grid">
+                <div class="meta-item"><strong>Target PDB ID:</strong> {meta['id']}</div>
+                <div class="meta-item"><strong>Method / Resolution:</strong> {meta['method']} ({meta['res']})</div>
+                <div class="meta-item"><strong>Lead Phytochemical (SMILES):</strong> <span class="scandata">{smiles_cache}</span></div>
+                <div class="meta-item"><strong>Grid Box Coordinates (X, Y, Z):</strong> {grid_params['cx']}, {grid_params['cy']}, {grid_params['cz']}</div>
+                <div class="meta-item"><strong>Grid Box Dimensions (Å):</strong> {grid_params['sx']} × {grid_params['sy']} × {grid_params['sz']}</div>
+                <div class="meta-item"><strong>Search Exhaustiveness:</strong> {grid_params['exh']}</div>
+            </div>
+
+            <h2>2. Baseline Molecular Docking Screening Results</h2>
+            <div class="table-wrapper">
+                {res_html}
+            </div>
+
+            <h2>3. Active Complex Visualization (Pose {selected_pose})</h2>
+            <p>Interactive 3D representation of the receptor-ligand complex binding site.</p>
+            <div id="container-3d" style="height: 480px; width: 100%; position: relative; border-radius:8px; border:1px solid #eaeaea; background:#ffffff; box-shadow: 0 4px 10px rgba(0,0,0,0.05);"></div>
+            <script src="https://cdnjs.cloudflare.com/ajax/libs/3Dmol/2.0.4/3Dmol-min.js"></script>
+            <script>
+                let viewer = $3Dmol.createViewer(document.getElementById('container-3d'), {{backgroundColor: '#ffffff'}});
+                let rec_data = `{safe_rec}`;
+                let lig_data = `{safe_lig}`;
+                if (rec_data.trim().length > 0) {{
+                    viewer.addModel(rec_data, 'pdb');
+                    viewer.setStyle({{model: 0}}, {{cartoon: {{colorscheme: 'chain', style: 'oval', thickness: 0.6}}}});
+                }}
+                if (lig_data.trim().length > 0) {{
+                    viewer.addModel(lig_data, 'pdb');
+                    viewer.setStyle({{model: 1}}, {{stick: {{colorscheme: 'greenCarbon', radius: 0.28}}}});
+                }}
+                viewer.zoomTo(); 
+                viewer.render();
+            </script>
+
+            <h3>Local Contact Residues & Bond Matrix</h3>
+            <div class="table-wrapper">
+                {int_html}
+            </div>
+
+            <h2>4. Generative Scaffold Optimization</h2>
+            <div class="meta-grid">
+                <div class="meta-item"><strong>Isolated Variant ID:</strong> {variant_row['Variant ID']}</div>
+                <div class="meta-item"><strong>Appended Fragment:</strong> {variant_row['Fragment Added']}</div>
+                <div class="meta-item"><strong>Synthetic Route Evaluated:</strong> {variant_row['Route']}</div>
+                <div class="meta-item"><strong>Predicted Yield Tier:</strong> <span style="color:#1e3c72; font-weight:bold;">{variant_row['Yield Prediction']}</span></div>
+            </div>
+            
+            <div class="structure-box">
+                <div class="structure-img">{v_2d}</div>
+                <div style="flex:1;">
+                    <h3>Redesigned Target SMILES String Matrix</h3>
+                    <div class="scandata" style="margin-bottom: 15px;">{variant_row['Redesigned SMILES']}</div>
+                    <strong>Pathway coordinates optimized via functional block swapping mechanics.</strong>
+                </div>
+            </div>
+
+            <h2>5. ADMET 3.0 Pharmacokinetics Analysis</h2>
+            <p><strong>Automated IUPAC Nomenclature Generation:</strong></p>
+            <div class="scandata" style="margin-bottom:20px; background:#e0f2fe; color:#0369a1; padding:10px; border-left: 4px solid #0284c7;">
+                {iupac}
+            </div>
+            
+            <h3>Molecular Property Comparative Matrix</h3>
+            <div class="table-wrapper">
+                <table>
+                    <tr><th>Parameter Parameterized</th><th>Original Phytochemical Lead</th><th>Redesigned Variant Matrix</th></tr>
+                    <tr><td>Obey Lipinski's Rule?</td><td>{adme_p['Lipinski_Obey']}</td><td>{adme_v['Lipinski_Obey']}</td></tr>
+                    <tr><td>Oral Bioavailability Probability</td><td>{adme_p['Oral_Bio']}</td><td>{adme_v['Oral_Bio']}</td></tr>
+                    <tr><td>Total Permeability Profile</td><td>{adme_p['Permeability']}</td><td>{adme_v['Permeability']}</td></tr>
+                    <tr><td>TPSA (Å²)</td><td>{adme_p['TPSA']}</td><td>{adme_v['TPSA']}</td></tr>
+                    <tr><td>Molecular Volume (Å³)</td><td>{adme_p['Volume']}</td><td>{adme_v['Volume']}</td></tr>
+                    <tr><td>Lipophilicity Parameter (LogP)</td><td>{adme_p['LogP']}</td><td>{adme_v['LogP']}</td></tr>
+                </table>
+            </div>
+
+            <h3>Structural Shift Assessment Narrative</h3>
+            <div class="summary-card">
+                {shift_msg}
+            </div>
+
+            <h3>📊 Modeled Vibrational Spectrum Footprint (FTIR)</h3>
+            <div style="text-align: center; margin: 20px 0;">
+                <img src="data:image/png;base64,{f_img}" style="max-width:100%; border-radius:6px; border: 1px solid #e2e8f0;"/>
+            </div>
+        </div>
+        <footer>
+            InSilico BioSphere System Technical Report | copyright@sarang dhote | All Rights Reserved.
+        </footer>
+    </body>
+    </html>
     """
 
 # =====================================================================
@@ -701,7 +801,7 @@ with col_params:
                 try:
                     mol = Chem.MolFromSmiles(smiles_input_val)
                     if mol:
-                        ok, _ = convert_smiles_to_pdbqt(smiles_input_val, "ligand.pdbqt")
+                        ok, msg = convert_smiles_to_pdbqt(smiles_input_val, "ligand.pdbqt")
                         if ok:
                             st.session_state.ligand_ready = True
                             st.session_state.smiles_cache = smiles_input_val
@@ -709,6 +809,7 @@ with col_params:
                             st.session_state.ligand_summary_text = f"**Name:** {pub_data['name']} | **Formula:** {pub_data['formula']} | **Molecular Weight:** {pub_data['mw']}"
                             st.success("Ligand metadata mapped from PubChem!")
                             trigger_rerun = True
+                        else: st.error(msg)
                 except Exception as e: st.error(f"SMILES Parsing Failure: {e}")
                 
         elif ligand_source == "Upload Structural File (.pdb, .sdf)" and uploaded_lig_buffer is not None:
@@ -816,7 +917,8 @@ with col_visual:
         if os.path.exists("docking_poses.pdbqt"):
             parsed_poses = split_docking_poses("docking_poses.pdbqt")
             if parsed_poses:
-                selected_pose = st.selectbox("Choose Docking Pose to Visualize:", options=list(parsed_poses.keys()), format_func=lambda x: f"Mode {x} Pose Fit")
+                # --- FIX 3: EXPLICIT SESSION STATE KEY FOR THE POSE DROPDOWN ---
+                selected_pose = st.selectbox("Choose Docking Pose to Visualize:", options=list(parsed_poses.keys()), format_func=lambda x: f"Mode {x} Pose Fit", key="selected_pose_export")
                 with open("protein.pdbqt", "r") as f: protein_data = f.read()
                 
                 def get_pose_affinity(stdout_text, idx):
@@ -898,49 +1000,6 @@ with col_visual:
                     surf_toggle = st.checkbox("Overlay Translucent Pocket Cavity Mesh", value=False)
                     
                 render_advanced_modeling_blueprint(receptor_data=protein_data, ligand_data=parsed_poses[selected_pose], mode=style_mode, show_surface=surf_toggle, interactions_list=active_interactions)
-                
-                st.write("---")
-                st.markdown("#### 📋 Comprehensive In Silico Screening Report")
-                
-                report_content = f"""=======================================================
-MOLECULAR DOCKING SCREENING ANALYSIS REPORT
-Generated dynamically via InSilico BioSphere Docking Tool
-Developed by: Dr. Sarang S. Dhote, Assistant Professor, Department of Chemistry, Shivaji Science College, Nagpur, India | Contact: sarangresearch@gmail.com
-=======================================================
-
-1. TARGET RECEPTOR MACROMOLECULE PROFILE
--------------------------------------------------------
-- Target Configuration Identifier: {st.session_state.pdb_id_display}
-- Primary Structure Data Source: RCSB Protein Data Bank Server
-
-2. SMALL MOLECULE DRUG LIGAND PROFILE
--------------------------------------------------------
-- Input Structural Identity Matrix (SMILES): {st.session_state.get('smiles_cache', 'Uploaded File Data Track')}
-- Compiled Chemical Attributes: {st.session_state.ligand_summary_text.replace('**','')}
-
-3. BOUND SPACE CONFIGURATION MECHANICS (GRID BOX)
--------------------------------------------------------
-- Center Coordinates Vector (X, Y, Z): ({grid_cx}, {grid_cy}, {grid_cz})
-- Grid Bounding Dimensions (X, Y, Z): ({grid_sx} Å, {grid_sy} Å, {grid_sz} Å)
-- Search Algorithm Exhaustiveness Index: {exhaustiveness}
-
-4. ACTIVE POSE COMPLEX BINDING METRICS (SELECTED MODE)
--------------------------------------------------------
-- Target Alignment Selection Mode: Mode {selected_pose} Pose Fit
-- Computed Gibbs Free Energy Affinity: {pose_affinity_score} kcal/mol
-- Measured Total Spatial Proximity Contact Atoms: {len(active_interactions)}
-
-5. POCKET CONTACT RESIDUES PROACTIVE BREAKDOWN
--------------------------------------------------------
-{report_breakdown_text}
-=======================================================
-Report compiled successfully. Ready for manuscript citation.
-**InSilico BioSphere: An Integrated Platform for Automated Molecular Docking.**
-    Developed by Dr. Sarang S. Dhote, Assistant Professor, Department of Chemistry, 
-    Shivaji Science College, Nagpur, India.
-=======================================================
-"""
-                st.text_area("Copy Code Summary Report Log Sheet Block directly:", value=report_content, height=320)
                 
                 st.markdown("#### 🧬 Local Contact Residues & Bond Assignments Matrix")
                 if active_interactions:
@@ -1205,10 +1264,34 @@ else:
             st.write("---")
             st.subheader("Data Export & Manuscript Support Systems")
             
+            # --- CRITICAL FIX 4: PASSING ALL DATA INTO THE REPORT ---
             meta_data = extract_pdb_metadata(st.session_state.local_target_path, st.session_state.pdb_id_display) if st.session_state.local_target_path else {"id":"Custom","title":"Uploaded Structure File","method":"N/A","res":"N/A"}
             b_img = generate_clean_2d_image(st.session_state.smiles_cache, include_labels=False, zoom_level=420)
+            
+            grid_params = {
+                'cx': st.session_state.cx, 'cy': st.session_state.cy, 'cz': st.session_state.cz,
+                'sx': st.session_state.sx, 'sy': st.session_state.sy, 'sz': st.session_state.sz,
+                'exh': st.session_state.exhaustiveness
+            }
+            
+            selected_pose_export = st.session_state.get('selected_pose_export', 1)
+            parsed_poses = split_docking_poses("docking_poses.pdbqt") if os.path.exists("docking_poses.pdbqt") else {}
+            ligand_pose_data = parsed_poses.get(selected_pose_export, "")
+            
+            active_interactions = compute_spatial_interactions("protein.pdbqt", ligand_pose_data) if ligand_pose_data else []
+            df_int = pd.DataFrame(active_interactions) if active_interactions else pd.DataFrame()
+            
+            try:
+                with open("protein.pdbqt", "r") as f: receptor_data = f.read()
+            except:
+                receptor_data = ""
+
             html_report = build_comprehensive_html_report(
-                meta_data, adme_p, adme_v, v_row, iupac, shift_msg, ftir_b64, v_2d, b_img
+                meta=meta_data, adme_p=adme_p, adme_v=adme_v, variant_row=v_row, iupac=iupac, shift_msg=shift_msg, 
+                f_img=ftir_b64, v_2d=v_2d, p_2d=b_img, smiles_cache=st.session_state.smiles_cache, 
+                baseline_affinity=st.session_state.baseline_affinity, grid_params=grid_params, 
+                df_results=df_results if 'df_results' in locals() else None, 
+                df_int=df_int, receptor_data=receptor_data, ligand_pose_data=ligand_pose_data, selected_pose=selected_pose_export
             )
             
             st.download_button(
