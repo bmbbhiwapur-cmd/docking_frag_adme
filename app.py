@@ -11,7 +11,12 @@ import pandas as pd
 import streamlit.components.v1 as components
 import base64
 import io
+
+# --- CRITICAL FIX 1: FORCE MATPLOTLIB TO HEADLESS BACKEND TO PREVENT SERVER CRASHES ---
+import matplotlib
+matplotlib.use('Agg') 
 import matplotlib.pyplot as plt
+
 from rdkit import Chem
 from rdkit.Chem import AllChem, Draw, Descriptors
 
@@ -55,6 +60,13 @@ def initialize_session_states():
             st.session_state[key] = value
 
 initialize_session_states()
+
+# --- CRITICAL FIX 2: SAFE RERUN VERSION CONTROL FALLBACK ---
+def safe_rerun():
+    try:
+        st.rerun()
+    except AttributeError:
+        st.experimental_rerun()
 
 # =====================================================================
 # 2. BIOINFORMATICS STRUCTURAL CONVERTERS & PARSERS
@@ -405,7 +417,6 @@ def get_iupac_name(smiles):
         return "IUPAC translation unavailable (Network Timeout)"
 
 def calculate_advanced_adme(smiles):
-    # BULLETPROOF FALLBACK: Guarantees Phase 3 NEVER crashes
     default_adme = {
         "MW": 0.0, "LogP": 0.0, "HBD": 0, "HBA": 0, "TPSA": 0.0, "Violations": 0,
         "Lipinski_Obey": "N/A", "Oral_Bio": "N/A", "MaxRing": 0, "Volume": 0.0,
@@ -612,7 +623,7 @@ if st.button("🔄 Reset Entire Environment", type="secondary", use_container_wi
     for f in ["protein.pdbqt", "ligand.pdbqt", "docking_poses.pdbqt", "temp_lig_state.pdb"]:
         if os.path.exists(f): os.remove(f)
     st.success("Dashboard cache and runtime structures completely cleared!")
-    st.rerun()
+    safe_rerun()
 
 # ---------------------------------------------------------------------
 # PHASE 1: CORE BASELINE DOCKING ENGINE
@@ -637,7 +648,7 @@ with col_params:
                     conv_ok, _ = convert_pdb_to_pdbqt(path, "protein.pdbqt")
                     st.session_state.target_ready = conv_ok
                     st.success(f"Protein {pdb_id_input.upper()} successfully loaded!")
-                    st.rerun()
+                    safe_rerun()
                 else: st.error(path)
     else:
         uploaded_file = st.file_uploader("Upload Target Protein File", type=["pdb", "pdbqt"])
@@ -653,7 +664,7 @@ with col_params:
                 else:
                     os.replace(path, "protein.pdbqt")
                     st.session_state.target_ready = True
-                st.rerun()
+                safe_rerun()
 
     if st.session_state.target_ready and st.session_state.local_target_path:
         meta = extract_pdb_metadata(st.session_state.local_target_path, st.session_state.pdb_id_display)
@@ -688,7 +699,7 @@ with col_params:
                             with open("ligand.pdbqt", "r") as f: st.session_state.serialized_ligand_block = f.read()
                             st.session_state.ligand_summary_text = f"**Name:** {pub_data['name']} | **Formula:** {pub_data['formula']} | **Molecular Weight:** {pub_data['mw']}"
                             st.success("Ligand metadata mapped from PubChem!")
-                            st.rerun()
+                            safe_rerun()
                 except Exception as e: st.error(f"SMILES Parsing Failure: {e}")
                 
         elif ligand_source == "Upload Structural File (.pdb, .sdf)" and uploaded_lig_buffer is not None:
@@ -698,7 +709,6 @@ with col_params:
             mol = Chem.MolFromPDBFile(temp_in, removeHs=False) if uploaded_lig_name.endswith(".pdb") else Chem.SDMolSupplier(temp_in, removeHs=False)[0]
             
             if mol:
-                # ROBUST SMILES EXTRACTION FIX
                 extracted_smiles = ""
                 try: 
                     Chem.SanitizeMol(mol)
@@ -748,7 +758,7 @@ with col_params:
                 st.session_state.cx, st.session_state.cy, st.session_state.cz = chosen_target["cx"], chosen_target["cy"], chosen_target["cz"]
                 st.session_state.sx, st.session_state.sy, st.session_state.sz = chosen_target["bx"], chosen_target["by"], chosen_target["bz"]
                 st.success("Grid parameters aligned over pocket boundaries!")
-                st.rerun()
+                safe_rerun()
 
     st.subheader("4. Search Space Mechanics (Grid Box)")
     
@@ -758,7 +768,7 @@ with col_params:
             st.session_state.cx, st.session_state.cy, st.session_state.cz = round(bcx, 1), round(bcy, 1), round(bcz, 1)
             st.session_state.sx, st.session_state.sy, st.session_state.sz = min(126, int(bsx)), min(126, int(bsy)), min(126, int(bsz))
             st.success("Grid parameters maximized to encapsulate the entire macromolecule!")
-            st.rerun()
+            safe_rerun()
         else:
             st.warning("Please load a Target Protein first to calculate dimensions.")
 
@@ -814,7 +824,6 @@ with col_visual:
 
                 active_interactions = compute_spatial_interactions("protein.pdbqt", parsed_poses[selected_pose])
                 
-                # Sort interactions by amino acid chemical properties for UI Display
                 amino_acid_categories = {"Acidic (-ve)": [], "Basic (+ve)": [], "Polar (Neutral)": [], "Hydrophobic": []}
                 for item in active_interactions:
                     res_full = item["Residue Contact"]
@@ -838,14 +847,14 @@ with col_visual:
                 try:
                     affinity_val = float(pose_affinity_score)
                     if affinity_val > 0:
-                        affinity_color = "#d32f2f" # Red
+                        affinity_color = "#d32f2f" 
                         affinity_label = f"{pose_affinity_score} <span style='font-size:18px; font-weight:normal;'>kcal/mol <br><span style='color:#d32f2f; font-size:14px;'>(⚠️ Not Useful / No Binding)</span></span>"
-                        bg_color = "#ffebee" # Light red background
+                        bg_color = "#ffebee" 
                         border_color = "#d32f2f"
                     else:
-                        affinity_color = "#1b5e20" # Green
+                        affinity_color = "#1b5e20" 
                         affinity_label = f"{pose_affinity_score} <span style='font-size:18px; font-weight:normal;'>kcal/mol</span>"
-                        bg_color = "#f0f7f4" # Light green background
+                        bg_color = "#f0f7f4" 
                         border_color = "#2e7d32"
                 except ValueError:
                     affinity_color = "#333"
@@ -881,7 +890,6 @@ with col_visual:
                     
                 render_advanced_modeling_blueprint(receptor_data=protein_data, ligand_data=parsed_poses[selected_pose], mode=style_mode, show_surface=surf_toggle, interactions_list=active_interactions)
                 
-                # --- COMPREHENSIVE REPORT MODULE ---
                 st.write("---")
                 st.markdown("#### 📋 Comprehensive In Silico Screening Report")
                 
@@ -925,7 +933,6 @@ Report compiled successfully. Ready for manuscript citation.
 """
                 st.text_area("Copy Code Summary Report Log Sheet Block directly:", value=report_content, height=320)
                 
-                # --- MATRIX TABLE ---
                 st.markdown("#### 🧬 Local Contact Residues & Bond Assignments Matrix")
                 if active_interactions:
                     df_int = pd.DataFrame(active_interactions)
@@ -974,7 +981,7 @@ if run_btn and can_dock:
             status_text.empty()
             st.session_state.docking_results_raw = "".join(output_log)
             time.sleep(0.8) 
-            st.rerun()
+            safe_rerun()
         else:
             status_text.empty()
             st.error("Engine encountered a calculation error.")
@@ -1064,7 +1071,7 @@ else:
                 if res and len(res) > 0:
                     st.session_state.rd_library = pd.DataFrame(res)
                     st.success(f"Successfully synthesized {len(res)} modified entries tracking baseline affinity data.")
-                    st.rerun()
+                    safe_rerun()
     
     with col_rd_v:
         b_img = generate_clean_2d_image(st.session_state.smiles_cache, include_labels=toggle_lbl, zoom_level=550)
@@ -1149,7 +1156,6 @@ else:
             })
             st.dataframe(comp_df, hide_index=True, use_container_width=True)
             
-            # Dynamic shift statement logic
             try:
                 vol_shift = adme_v['Volume'] - adme_p['Volume']
                 tpsa_shift = adme_v['TPSA'] - adme_p['TPSA']
@@ -1180,7 +1186,6 @@ else:
                 
             st.success(shift_msg)
             
-            # Report compilation deployment
             st.write("---")
             st.subheader("Data Export & Manuscript Support Systems")
             
