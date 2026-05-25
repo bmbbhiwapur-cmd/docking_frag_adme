@@ -108,6 +108,25 @@ def parse_bound_ligands(file_path):
         })
     return processed_ligands
 
+def compute_protein_bounding_box(pdbqt_file):
+    """Calculates the absolute bounds of the entire macromolecule for blind docking."""
+    if not os.path.exists(pdbqt_file): return 0, 0, 0, 20, 20, 20
+    coords = []
+    with open(pdbqt_file, 'r') as f:
+        for line in f:
+            if line.startswith(("ATOM", "HETATM")):
+                try:
+                    x, y, z = float(line[30:38].strip()), float(line[38:46].strip()), float(line[46:54].strip())
+                    coords.append((x, y, z))
+                except ValueError: pass
+    if not coords: return 0, 0, 0, 20, 20, 20
+    coords = np.array(coords)
+    min_c = coords.min(axis=0)
+    max_c = coords.max(axis=0)
+    center = (min_c + max_c) / 2.0
+    size = (max_c - min_c) + 15.0  # Add 15 Å buffer to ensure ligands can fit on the edges
+    return center[0], center[1], center[2], size[0], size[1], size[2]
+
 # --- BIOINFORMATICS STRUCTURAL CONVERTERS ---
 def fetch_pdb_from_rcsb(pdb_id):
     pdb_id = pdb_id.strip().lower()
@@ -426,12 +445,24 @@ with col_params:
                 st.rerun()
 
     st.header("4. Search Space Mechanics (Grid Box)")
+    
+    if st.button("🌐 Auto-Configure for Blind Docking (Whole Protein)"):
+        if st.session_state.target_ready and os.path.exists("protein.pdbqt"):
+            bcx, bcy, bcz, bsx, bsy, bsz = compute_protein_bounding_box("protein.pdbqt")
+            st.session_state.cx, st.session_state.cy, st.session_state.cz = round(bcx, 1), round(bcy, 1), round(bcz, 1)
+            # Cap slider max at 126 Å to prevent Vina crashes, but give plenty of room for blind docking
+            st.session_state.sx, st.session_state.sy, st.session_state.sz = min(126, int(bsx)), min(126, int(bsy)), min(126, int(bsz))
+            st.success("Grid parameters maximized to encapsulate the entire macromolecule!")
+            st.rerun()
+        else:
+            st.warning("Please load a Target Protein first to calculate dimensions.")
+
     grid_cx = st.number_input("Center X Coordinate", value=float(st.session_state.cx), step=0.1)
     grid_cy = st.number_input("Center Y Coordinate", value=float(st.session_state.cy), step=0.1)
     grid_cz = st.number_input("Center Z Coordinate", value=float(st.session_state.cz), step=0.1)
-    grid_sx = st.slider("Grid Box Size X (Å)", 10, 40, int(st.session_state.sx))
-    grid_sy = st.slider("Grid Box Size Y (Å)", 10, 40, int(st.session_state.sy))
-    grid_sz = st.slider("Grid Box Size Z (Å)", 10, 40, int(st.session_state.sz))
+    grid_sx = st.slider("Grid Box Size X (Å)", 10, 126, int(st.session_state.sx))
+    grid_sy = st.slider("Grid Box Size Y (Å)", 10, 126, int(st.session_state.sy))
+    grid_sz = st.slider("Grid Box Size Z (Å)", 10, 126, int(st.session_state.sz))
     exhaustiveness = st.slider("Search Exhaustiveness", min_value=4, max_value=32, value=8, step=4)
     
     can_dock = bool(st.session_state.target_ready and st.session_state.ligand_ready)
@@ -471,18 +502,38 @@ with col_visual:
                     return "N/A"
                 
                 pose_affinity_score = get_pose_affinity(st.session_state.docking_results_raw, selected_pose)
+                
+                # --- Binding Energy Validation Formatting ---
+                try:
+                    affinity_val = float(pose_affinity_score)
+                    if affinity_val > 0:
+                        affinity_color = "#d32f2f" # Red
+                        affinity_label = f"{pose_affinity_score} <span style='font-size:18px; font-weight:normal;'>kcal/mol <br><span style='color:#d32f2f; font-size:14px;'>(⚠️ Not Useful / No Binding)</span></span>"
+                        bg_color = "#ffebee" # Light red background
+                        border_color = "#d32f2f"
+                    else:
+                        affinity_color = "#1b5e20" # Green
+                        affinity_label = f"{pose_affinity_score} <span style='font-size:18px; font-weight:normal;'>kcal/mol</span>"
+                        bg_color = "#f0f7f4" # Light green background
+                        border_color = "#2e7d32"
+                except ValueError:
+                    affinity_color = "#333"
+                    affinity_label = "N/A"
+                    bg_color = "#f4f4f4"
+                    border_color = "#999"
+
                 active_interactions = compute_spatial_interactions("protein.pdbqt", parsed_poses[selected_pose])
                 
                 html_metric_card = f"""
-                <div style="background-color:#f0f7f4; border-left:6px solid #2e7d32; padding:16px; border-radius:8px; margin-bottom:15px; font-family:sans-serif;">
+                <div style="background-color:{bg_color}; border-left:6px solid {border_color}; padding:16px; border-radius:8px; margin-bottom:15px; font-family:sans-serif;">
                     <div style="display:flex; justify-content:space-between; align-items:center;">
                         <div>
                             <span style="font-size:12px; color:#555; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px;">Active Pose Affinity</span><br>
-                            <span style="font-size:36px; font-weight:900; color:#1b5e20;">{pose_affinity_score} <span style="font-size:18px; font-weight:normal;">kcal/mol</span></span>
+                            <span style="font-size:36px; font-weight:900; color:{affinity_color};">{affinity_label}</span>
                         </div>
                         <div style="text-align:right; border-left:1px solid #e0e8e4; padding-left:15px;">
                             <span style="font-size:12px; color:#555; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px;">Total Contacts</span><br>
-                            <span style="font-size:32px; font-weight:800; color:#2e7d32;">{len(active_interactions)}</span>
+                            <span style="font-size:32px; font-weight:800; color:#333;">{len(active_interactions)}</span>
                         </div>
                     </div>
                 </div>
@@ -507,8 +558,9 @@ with col_visual:
 
 # --- ENGINE COMPUTATION EXECUTION BOUNDARY ---
 if run_btn and can_dock:
+    vina_path = os.path.abspath("vina")
     vina_command = [
-        "./vina", "--receptor", "protein.pdbqt", "--ligand", "ligand.pdbqt", 
+        vina_path, "--receptor", "protein.pdbqt", "--ligand", "ligand.pdbqt", 
         "--center_x", str(grid_cx), "--center_y", str(grid_cy), "--center_z", str(grid_cz), 
         "--size_x", str(grid_sx), "--size_y", str(grid_sy), "--size_z", str(grid_sz), 
         "--exhaustiveness", str(exhaustiveness), "--out", "docking_poses.pdbqt"
@@ -578,7 +630,15 @@ if st.session_state.docking_results_raw is not None:
     df_results = parse_vina_output_with_residues(st.session_state.docking_results_raw)
     if not df_results.empty:
         col_table, col_export = st.columns([2, 1])
-        with col_table: st.dataframe(df_results, hide_index=True, use_container_width=True)
+        with col_table: 
+            # Apply styling to highlight positive binding affinities in red in the dataframe
+            def color_positive_red(val):
+                color = 'red' if val > 0 else 'black'
+                return f'color: {color}'
+            
+            styled_df = df_results.style.map(color_positive_red, subset=['Affinity (kcal/mol)'])
+            st.dataframe(styled_df, hide_index=True, use_container_width=True)
+            
         with col_export:
             csv_data = df_results.to_csv(index=False).encode('utf-8')
             st.download_button(label="📥 Download Data Sheet (.CSV)", data=csv_data, file_name="screening_affinity_report.csv", mime="text/csv", use_container_width=True)
