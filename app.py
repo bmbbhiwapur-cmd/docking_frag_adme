@@ -306,7 +306,7 @@ def render_advanced_modeling_blueprint(receptor_data, ligand_data, mode="cartoon
 # --- APPLICATION DASHBOARD WORKSPACE ---
 st.set_page_config(page_title="In Silico Docking Hub", layout="wide")
 st.title("🔬 InSilico BioSphere - Molecular Docking Engine")
-st.markdown("**Developed by: Dr. Sarang S. Dhote, Assistant Professor, Department of Chemistry, Shivaji Science College, Nagpur, India | Tech Logic Core Systems (TLCS)**")
+st.markdown("**Developed by: Dr. Sarang S. Dhote, Assistant Professor, Department of Chemistry, Shivaji Science College, Nagpur, India | Contact-sarangresearch@gmail.com**")
 
 # Initialize states
 for key in ["cx", "cy", "cz"]: 
