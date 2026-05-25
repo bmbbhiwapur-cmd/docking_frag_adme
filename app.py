@@ -450,7 +450,6 @@ with col_params:
         if st.session_state.target_ready and os.path.exists("protein.pdbqt"):
             bcx, bcy, bcz, bsx, bsy, bsz = compute_protein_bounding_box("protein.pdbqt")
             st.session_state.cx, st.session_state.cy, st.session_state.cz = round(bcx, 1), round(bcy, 1), round(bcz, 1)
-            # Cap slider max at 126 Å to prevent Vina crashes, but give plenty of room for blind docking
             st.session_state.sx, st.session_state.sy, st.session_state.sz = min(126, int(bsx)), min(126, int(bsy)), min(126, int(bsz))
             st.success("Grid parameters maximized to encapsulate the entire macromolecule!")
             st.rerun()
@@ -502,8 +501,14 @@ with col_visual:
                     return "N/A"
                 
                 pose_affinity_score = get_pose_affinity(st.session_state.docking_results_raw, selected_pose)
+                active_interactions = compute_spatial_interactions("protein.pdbqt", parsed_poses[selected_pose])
                 
-                # --- Binding Energy Validation Formatting ---
+                # Extract specific interacting residues for display inside the highlighted box
+                if active_interactions:
+                    unique_residues = ", ".join(sorted(list(set([i["Residue Contact"] for i in active_interactions]))))
+                else:
+                    unique_residues = "None detected within 3.8 Å threshold."
+                
                 try:
                     affinity_val = float(pose_affinity_score)
                     if affinity_val > 0:
@@ -522,11 +527,10 @@ with col_visual:
                     bg_color = "#f4f4f4"
                     border_color = "#999"
 
-                active_interactions = compute_spatial_interactions("protein.pdbqt", parsed_poses[selected_pose])
-                
+                # Formatted Metric Card with Interacting Residues Included
                 html_metric_card = f"""
                 <div style="background-color:{bg_color}; border-left:6px solid {border_color}; padding:16px; border-radius:8px; margin-bottom:15px; font-family:sans-serif;">
-                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 12px;">
                         <div>
                             <span style="font-size:12px; color:#555; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px;">Active Pose Affinity</span><br>
                             <span style="font-size:36px; font-weight:900; color:{affinity_color};">{affinity_label}</span>
@@ -535,6 +539,10 @@ with col_visual:
                             <span style="font-size:12px; color:#555; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px;">Total Contacts</span><br>
                             <span style="font-size:32px; font-weight:800; color:#333;">{len(active_interactions)}</span>
                         </div>
+                    </div>
+                    <div style="border-top: 1px solid {border_color}; padding-top: 12px; opacity: 0.9;">
+                        <span style="font-size:12px; color:#555; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px;">Interacting Amino Acid Residues:</span><br>
+                        <span style="font-size:14px; font-weight:600; color:#333; word-wrap: break-word;">{unique_residues}</span>
                     </div>
                 </div>
                 """
@@ -547,14 +555,6 @@ with col_visual:
                     surf_toggle = st.checkbox("Overlay Translucent Pocket Cavity Mesh", value=False)
                     
                 render_advanced_modeling_blueprint(receptor_data=protein_data, ligand_data=parsed_poses[selected_pose], mode=style_mode, show_surface=surf_toggle, interactions_list=active_interactions)
-                
-                st.write("---")
-                st.subheader("🧬 Local Contact Residues & Bond Assignments Matrix")
-                if active_interactions:
-                    df_int = pd.DataFrame(active_interactions)
-                    st.dataframe(df_int[["Residue Contact", "Interaction Type", "Distance (Å)"]], hide_index=True, use_container_width=True)
-                else:
-                    st.info("No close contacts detected within a 3.8 Å threshold radius.")
 
 # --- ENGINE COMPUTATION EXECUTION BOUNDARY ---
 if run_btn and can_dock:
@@ -611,6 +611,7 @@ if st.session_state.docking_results_raw is not None:
     st.header("📊 Screening Metrics Dashboard & Data Export")
     
     def parse_vina_output_with_residues(stdout_text):
+        """Restored the parser to include residue arrays for the final CSV export."""
         data = []
         pattern = re.compile(r"^\s*(\d+)\s+([-+]?\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)")
         poses_dict = split_docking_poses("docking_poses.pdbqt")
@@ -622,16 +623,22 @@ if st.session_state.docking_results_raw is not None:
                 if mode_idx in poses_dict:
                     ints = compute_spatial_interactions("protein.pdbqt", poses_dict[mode_idx])
                     if ints:
-                        res_string = ", ".join(list(set([i["Residue Contact"] for i in ints])))
-                        bond_types = ", ".join(list(set([i["Interaction Type"] for i in ints])))
-                data.append({"Binding Mode": mode_idx, "Affinity (kcal/mol)": float(match.group(2)), "RMSD l.b.": float(match.group(3)), "RMSD u.b.": float(match.group(4)), "Interacting Residues": res_string, "Contact Bond Types": bond_types})
+                        res_string = ", ".join(sorted(list(set([i["Residue Contact"] for i in ints]))))
+                        bond_types = ", ".join(sorted(list(set([i["Interaction Type"] for i in ints]))))
+                data.append({
+                    "Binding Mode": mode_idx, 
+                    "Affinity (kcal/mol)": float(match.group(2)), 
+                    "RMSD l.b.": float(match.group(3)), 
+                    "RMSD u.b.": float(match.group(4)), 
+                    "Interacting Residues": res_string, 
+                    "Contact Bond Types": bond_types
+                })
         return pd.DataFrame(data)
 
     df_results = parse_vina_output_with_residues(st.session_state.docking_results_raw)
     if not df_results.empty:
         col_table, col_export = st.columns([2, 1])
         with col_table: 
-            # Apply styling to highlight positive binding affinities in red in the dataframe
             def color_positive_red(val):
                 color = 'red' if val > 0 else 'black'
                 return f'color: {color}'
