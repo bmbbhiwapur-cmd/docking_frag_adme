@@ -207,6 +207,7 @@ def parse_pdbqt_coordinates(pdbqt_string):
     return atoms
 
 def compute_spatial_interactions(receptor_file, ligand_pdbqt_str):
+    """Calculates contacts specifically to render visual lines in the 3Dmol viewer."""
     interactions = []
     if not os.path.exists(receptor_file): return interactions
     with open(receptor_file, "r") as f:
@@ -450,7 +451,6 @@ with col_params:
         if st.session_state.target_ready and os.path.exists("protein.pdbqt"):
             bcx, bcy, bcz, bsx, bsy, bsz = compute_protein_bounding_box("protein.pdbqt")
             st.session_state.cx, st.session_state.cy, st.session_state.cz = round(bcx, 1), round(bcy, 1), round(bcz, 1)
-            # Cap slider max at 126 Å to prevent Vina crashes, but give plenty of room for blind docking
             st.session_state.sx, st.session_state.sy, st.session_state.sz = min(126, int(bsx)), min(126, int(bsy)), min(126, int(bsz))
             st.success("Grid parameters maximized to encapsulate the entire macromolecule!")
             st.rerun()
@@ -503,7 +503,6 @@ with col_visual:
                 
                 pose_affinity_score = get_pose_affinity(st.session_state.docking_results_raw, selected_pose)
                 
-                # --- Binding Energy Validation Formatting ---
                 try:
                     affinity_val = float(pose_affinity_score)
                     if affinity_val > 0:
@@ -547,14 +546,6 @@ with col_visual:
                     surf_toggle = st.checkbox("Overlay Translucent Pocket Cavity Mesh", value=False)
                     
                 render_advanced_modeling_blueprint(receptor_data=protein_data, ligand_data=parsed_poses[selected_pose], mode=style_mode, show_surface=surf_toggle, interactions_list=active_interactions)
-                
-                st.write("---")
-                st.subheader("🧬 Local Contact Residues & Bond Assignments Matrix")
-                if active_interactions:
-                    df_int = pd.DataFrame(active_interactions)
-                    st.dataframe(df_int[["Residue Contact", "Interaction Type", "Distance (Å)"]], hide_index=True, use_container_width=True)
-                else:
-                    st.info("No close contacts detected within a 3.8 Å threshold radius.")
 
 # --- ENGINE COMPUTATION EXECUTION BOUNDARY ---
 if run_btn and can_dock:
@@ -610,28 +601,26 @@ if st.session_state.docking_results_raw is not None:
     st.write("---")
     st.header("📊 Screening Metrics Dashboard & Data Export")
     
-    def parse_vina_output_with_residues(stdout_text):
+    def parse_vina_output(stdout_text):
+        """Extracts numerical affinity outputs without computing heavy residue interactions."""
         data = []
         pattern = re.compile(r"^\s*(\d+)\s+([-+]?\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)")
-        poses_dict = split_docking_poses("docking_poses.pdbqt")
         for line in stdout_text.split("\n"):
             match = pattern.match(line)
             if match:
                 mode_idx = int(match.group(1))
-                res_string, bond_types = "N/A", "N/A"
-                if mode_idx in poses_dict:
-                    ints = compute_spatial_interactions("protein.pdbqt", poses_dict[mode_idx])
-                    if ints:
-                        res_string = ", ".join(list(set([i["Residue Contact"] for i in ints])))
-                        bond_types = ", ".join(list(set([i["Interaction Type"] for i in ints])))
-                data.append({"Binding Mode": mode_idx, "Affinity (kcal/mol)": float(match.group(2)), "RMSD l.b.": float(match.group(3)), "RMSD u.b.": float(match.group(4)), "Interacting Residues": res_string, "Contact Bond Types": bond_types})
+                data.append({
+                    "Binding Mode": mode_idx, 
+                    "Affinity (kcal/mol)": float(match.group(2)), 
+                    "RMSD l.b.": float(match.group(3)), 
+                    "RMSD u.b.": float(match.group(4))
+                })
         return pd.DataFrame(data)
 
-    df_results = parse_vina_output_with_residues(st.session_state.docking_results_raw)
+    df_results = parse_vina_output(st.session_state.docking_results_raw)
     if not df_results.empty:
         col_table, col_export = st.columns([2, 1])
         with col_table: 
-            # Apply styling to highlight positive binding affinities in red in the dataframe
             def color_positive_red(val):
                 color = 'red' if val > 0 else 'black'
                 return f'color: {color}'
