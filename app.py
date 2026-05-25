@@ -30,6 +30,8 @@ import subprocess
 
 import numpy as np
 import pandas as pd
+import matplotlib
+matplotlib.use("Agg")  # Force headless backend BEFORE pyplot import (Streamlit Cloud is headless)
 import matplotlib.pyplot as plt
 
 import streamlit as st
@@ -91,16 +93,26 @@ for k, v in DEFAULT_STATE.items():
 # =====================================================================
 def ensure_linux_vina_exists():
     binary_name = "./vina"
-    if not os.path.exists(binary_name):
+    # Re-download if missing or zero-byte (failed previous download)
+    needs_download = (not os.path.exists(binary_name)) or os.path.getsize(binary_name) < 1000
+    if needs_download:
         with st.spinner("Initializing AutoDock Vina binary..."):
             try:
                 url = ("https://github.com/ccsb-scripps/AutoDock-Vina/releases/"
                        "download/v1.2.5/vina_1.2.5_linux_x86_64")
-                urllib.request.urlretrieve(url, binary_name)
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=60) as resp, open(binary_name, "wb") as out:
+                    out.write(resp.read())
                 os.chmod(binary_name, 0o755)
-                st.success("Vina binary mounted successfully!")
+                size_mb = os.path.getsize(binary_name) / 1024 / 1024
+                if size_mb < 0.5:
+                    st.error(f"Vina binary downloaded but suspiciously small ({size_mb:.2f} MB). "
+                             "The container may not allow github.com.")
+                else:
+                    st.success(f"Vina binary mounted ({size_mb:.1f} MB).")
             except Exception as e:
-                st.error(f"Failed to bootstrap Vina binary: {e}")
+                st.error(f"Failed to download Vina binary: {e}\n"
+                         "If this persists, allow github.com in your network rules.")
 
 ensure_linux_vina_exists()
 
