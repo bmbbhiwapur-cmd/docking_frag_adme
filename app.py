@@ -748,4 +748,443 @@ with tab1:
                 selected_lig_id = st.selectbox("Select native co-crystal target to auto-fill grid box:", options=range(len(bound_ligands_list)), format_func=lambda idx: f"{bound_ligands_list[idx]['ID']} (Chain {bound_ligands_list[idx]['Chain']}-ResSeq {bound_ligands_list[idx]['ResSeq']})")
                 if st.button("🎯 Lock Coordinates to Native Site"):
                     chosen_target = bound_ligands_list[selected_lig_id]
-                    st.session_state.cx, st.session_state.cy,
+                    st.session_state.cx, st.session_state.cy, st.session_state.cz = chosen_target["cx"], chosen_target["cy"], chosen_target["cz"]
+                    st.session_state.sx, st.session_state.sy, st.session_state.sz = chosen_target["bx"], chosen_target["by"], chosen_target["bz"]
+                    st.success("Grid parameters aligned over pocket boundaries!")
+                    st.rerun()
+    
+        st.header("4. Search Space Mechanics (Grid Box)")
+        
+        if st.button("🌐 Auto-Configure for Blind Docking (Whole Protein)"):
+            if st.session_state.target_ready and os.path.exists("protein.pdbqt"):
+                bcx, bcy, bcz, bsx, bsy, bsz = compute_protein_bounding_box("protein.pdbqt")
+                st.session_state.cx, st.session_state.cy, st.session_state.cz = round(bcx, 1), round(bcy, 1), round(bcz, 1)
+                st.session_state.sx, st.session_state.sy, st.session_state.sz = min(126, int(bsx)), min(126, int(bsy)), min(126, int(bsz))
+                st.success("Grid parameters maximized to encapsulate the entire macromolecule!")
+                st.rerun()
+            else:
+                st.warning("Please load a Target Protein first to calculate dimensions.")
+    
+        grid_cx = st.number_input("Center X Coordinate", value=float(st.session_state.cx), step=0.1)
+        grid_cy = st.number_input("Center Y Coordinate", value=float(st.session_state.cy), step=0.1)
+        grid_cz = st.number_input("Center Z Coordinate", value=float(st.session_state.cz), step=0.1)
+        grid_sx = st.slider("Grid Box Size X (Å)", 10, 126, int(st.session_state.sx))
+        grid_sy = st.slider("Grid Box Size Y (Å)", 10, 126, int(st.session_state.sy))
+        grid_sz = st.slider("Grid Box Size Z (Å)", 10, 126, int(st.session_state.sz))
+        exhaustiveness = st.slider("Search Exhaustiveness", min_value=4, max_value=32, value=8, step=4)
+        
+        can_dock = bool(st.session_state.target_ready and st.session_state.ligand_ready)
+        run_btn = st.button("🚀 Initialize Docking Algorithm", type="primary", disabled=not can_dock)
+    
+    with col_visual:
+        st.header("5. Active Viewport Canvas")
+        
+        if st.session_state.docking_results_raw is None:
+            view_tabs = st.tabs(["3D Structural Space", "2D Schematic Topology View"])
+            with view_tabs[0]:
+                receptor_view_data = ""
+                if st.session_state.target_ready and os.path.exists("protein.pdbqt"):
+                    with open("protein.pdbqt", "r") as f: receptor_view_data = f.read()
+                render_advanced_modeling_blueprint(receptor_view_data, st.session_state.serialized_ligand_block, mode="cartoon")
+            with view_tabs[1]:
+                if st.session_state.ligand_ready and st.session_state.smiles_cache:
+                    try:
+                        m_img = Chem.MolFromPDBFile(st.session_state.smiles_cache, removeHs=True) if "raw_ligand" in st.session_state.smiles_cache else Chem.MolFromSmiles(st.session_state.smiles_cache)
+                        if m_img:
+                            Chem.SanitizeMol(m_img)
+                            img_b64 = generate_2d_ligand_img(m_img)
+                            if img_b64: st.markdown(f'<div style="text-align:center; background: white; padding:10px; border-radius:5px;"><img src="data:image/png;base64,{img_b64}"/></div>', unsafe_allow_html=True)
+                    except Exception: pass
+        else:
+            st.subheader("Interactive Complex Viewport")
+            if os.path.exists("docking_poses.pdbqt"):
+                parsed_poses = split_docking_poses("docking_poses.pdbqt")
+                if parsed_poses:
+                    selected_pose = st.selectbox("Choose Docking Pose to Visualize:", options=list(parsed_poses.keys()), format_func=lambda x: f"Mode {x} Pose Fit")
+                    with open("protein.pdbqt", "r") as f: protein_data = f.read()
+                    
+                    def get_pose_affinity(stdout_text, idx):
+                        for line in stdout_text.split("\n"):
+                            m = re.match(r"^\s*(\d+)\s+([-+]?\d+\.\d+)", line)
+                            if m and int(m.group(1)) == idx: return m.group(2)
+                        return "N/A"
+                    
+                    pose_affinity_score = get_pose_affinity(st.session_state.docking_results_raw, selected_pose)
+                    
+                    if selected_pose == 1 and pose_affinity_score != "N/A":
+                        try: st.session_state.baseline_affinity = float(pose_affinity_score)
+                        except ValueError: pass
+
+                    active_interactions = compute_spatial_interactions("protein.pdbqt", parsed_poses[selected_pose])
+                    
+                    # Sort interactions by amino acid chemical properties for UI Display
+                    amino_acid_categories = {"Acidic (-ve)": [], "Basic (+ve)": [], "Polar (Neutral)": [], "Hydrophobic": []}
+                    for item in active_interactions:
+                        res_full = item["Residue Contact"]
+                        res_name = "".join([c for c in res_full if c.isalpha()]).upper()
+                        if res_name in ["ASP", "GLU"]: amino_acid_categories["Acidic (-ve)"].append(res_full)
+                        elif res_name in ["LYS", "ARG", "HIS"]: amino_acid_categories["Basic (+ve)"].append(res_full)
+                        elif res_name in ["SER", "THR", "ASN", "GLN", "CYS", "TYR"]: amino_acid_categories["Polar (Neutral)"].append(res_full)
+                        else: amino_acid_categories["Hydrophobic"].append(res_full)
+                    
+                    breakdown_html = ""
+                    report_breakdown_text = ""
+                    for cat_name, res_list in amino_acid_categories.items():
+                        if res_list:
+                            labels_joined = ", ".join(sorted(list(set(res_list))))
+                            breakdown_html += f"<p style='margin:4px 0; font-size:13px;'><b>{cat_name}:</b> <span style='color:#333;'>{labels_joined}</span></p>"
+                            report_breakdown_text += f"- {cat_name}: {labels_joined}\n"
+                    if not breakdown_html: 
+                        breakdown_html = "<p style='margin:4px 0; color:#777; font-size:13px;'>No pocket interactions detected.</p>"
+                        report_breakdown_text = "- No close contacts detected under 3.8 Angstroms.\n"
+                    
+                    try:
+                        affinity_val = float(pose_affinity_score)
+                        if affinity_val > 0:
+                            affinity_color = "#d32f2f" # Red
+                            affinity_label = f"{pose_affinity_score} <span style='font-size:18px; font-weight:normal;'>kcal/mol <br><span style='color:#d32f2f; font-size:14px;'>(⚠️ Not Useful / No Binding)</span></span>"
+                            bg_color = "#ffebee" # Light red background
+                            border_color = "#d32f2f"
+                        else:
+                            affinity_color = "#1b5e20" # Green
+                            affinity_label = f"{pose_affinity_score} <span style='font-size:18px; font-weight:normal;'>kcal/mol</span>"
+                            bg_color = "#f0f7f4" # Light green background
+                            border_color = "#2e7d32"
+                    except ValueError:
+                        affinity_color = "#333"
+                        affinity_label = "N/A"
+                        bg_color = "#f4f4f4"
+                        border_color = "#999"
+    
+                    html_metric_card = f"""
+                    <div style="background-color:{bg_color}; border-left:6px solid {border_color}; padding:16px; border-radius:8px; margin-bottom:15px; font-family:sans-serif;">
+                        <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #e0e8e4; padding-bottom:8px; margin-bottom:10px;">
+                            <div>
+                                <span style="font-size:12px; color:#555; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px;">Active Pose Affinity</span><br>
+                                <span style="font-size:36px; font-weight:900; color:{affinity_color};">{affinity_label}</span>
+                            </div>
+                            <div style="text-align:right; border-left:1px solid #e0e8e4; padding-left:15px;">
+                                <span style="font-size:12px; color:#555; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px;">Total Contacts</span><br>
+                                <span style="font-size:32px; font-weight:800; color:#333;">{len(active_interactions)}</span>
+                            </div>
+                        </div>
+                        <div>
+                            <span style="font-size:11px; color:#666; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px; display:block; margin-bottom:4px;">Binding Site Amino Acid Properties Breakdown:</span>
+                            {breakdown_html}
+                        </div>
+                    </div>
+                    """
+                    st.html(html_metric_card)
+                    
+                    col_render, col_mesh = st.columns([1, 1])
+                    with col_render:
+                        style_mode = re.sub(r'\W+', '', st.radio("Macromolecule Style Mode:", ["Cartoon Ribbon Mesh", "Spacefill", "Sticks Profile"]).split()[0].lower())
+                    with col_mesh:
+                        surf_toggle = st.checkbox("Overlay Translucent Pocket Cavity Mesh", value=False)
+                        
+                    render_advanced_modeling_blueprint(receptor_data=protein_data, ligand_data=parsed_poses[selected_pose], mode=style_mode, show_surface=surf_toggle, interactions_list=active_interactions)
+                    
+                    # --- COMPREHENSIVE REPORT MODULE ---
+                    st.write("---")
+                    st.subheader("📋 Comprehensive In Silico Screening Report")
+                    
+                    report_content = f"""=======================================================
+MOLECULAR DOCKING SCREENING ANALYSIS REPORT
+Generated dynamically via InSilico BioSphere Docking Tool
+Developed by: Dr. Sarang S. Dhote, Assistant Professor, Department of Chemistry, Shivaji Science College, Nagpur, India | Contact: sarangresearch@gmail.com
+=======================================================
+
+1. TARGET RECEPTOR MACROMOLECULE PROFILE
+-------------------------------------------------------
+- Target Configuration Identifier: {st.session_state.pdb_id_display}
+- Primary Structure Data Source: RCSB Protein Data Bank Server
+
+2. SMALL MOLECULE DRUG LIGAND PROFILE
+-------------------------------------------------------
+- Input Structural Identity Matrix (SMILES): {st.session_state.get('smiles_cache', 'Uploaded File Data Track')}
+- Compiled Chemical Attributes: {st.session_state.ligand_summary_text.replace('**','')}
+
+3. BOUND SPACE CONFIGURATION MECHANICS (GRID BOX)
+-------------------------------------------------------
+- Center Coordinates Vector (X, Y, Z): ({grid_cx}, {grid_cy}, {grid_cz})
+- Grid Bounding Dimensions (X, Y, Z): ({grid_sx} Å, {grid_sy} Å, {grid_sz} Å)
+- Search Algorithm Exhaustiveness Index: {exhaustiveness}
+
+4. ACTIVE POSE COMPLEX BINDING METRICS (SELECTED MODE)
+-------------------------------------------------------
+- Target Alignment Selection Mode: Mode {selected_pose} Pose Fit
+- Computed Gibbs Free Energy Affinity: {pose_affinity_score} kcal/mol
+- Measured Total Spatial Proximity Contact Atoms: {len(active_interactions)}
+
+5. POCKET CONTACT RESIDUES PROACTIVE BREAKDOWN
+-------------------------------------------------------
+{report_breakdown_text}
+=======================================================
+Report compiled successfully. Ready for manuscript citation.
+**InSilico BioSphere: An Integrated Platform for Automated Molecular Docking.**
+    Developed by Dr. Sarang S. Dhote, Assistant Professor, Department of Chemistry, 
+    Shivaji Science College, Nagpur, India.
+=======================================================
+"""
+                    st.text_area("Copy Code Summary Report Log Sheet Block directly:", value=report_content, height=320)
+                    
+                    # --- MATRIX TABLE ---
+                    st.subheader("🧬 Local Contact Residues & Bond Assignments Matrix")
+                    if active_interactions:
+                        df_int = pd.DataFrame(active_interactions)
+                        st.dataframe(df_int[["Residue Contact", "Interaction Type", "Distance (Å)"]], hide_index=True, use_container_width=True)
+                    else:
+                        st.info("No close contacts detected within a 3.8 Å threshold radius.")
+    
+    # --- ENGINE EXECUTION ---
+    if run_btn and can_dock:
+        vina_path = os.path.abspath("vina")
+        vina_command = [
+            vina_path, "--receptor", "protein.pdbqt", "--ligand", "ligand.pdbqt", 
+            "--center_x", str(grid_cx), "--center_y", str(grid_cy), "--center_z", str(grid_cz), 
+            "--size_x", str(grid_sx), "--size_y", str(grid_sy), "--size_z", str(grid_sz), 
+            "--exhaustiveness", str(exhaustiveness), "--out", "docking_poses.pdbqt"
+        ]
+        
+        progress_bar = st.progress(0, text="Initializing computational engine...")
+        status_text = st.empty()
+        
+        try:
+            process = subprocess.Popen(vina_command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            output_log = []
+            progress_count = 0
+            current_line = ""
+            
+            while True:
+                char = process.stdout.read(1).decode("utf-8", errors="ignore")
+                if not char: break
+                output_log.append(char)
+                
+                if char == '*':
+                    progress_count += 1
+                    percent = min(100, int((progress_count / 50) * 100))
+                    progress_bar.progress(percent, text=f"Exploring binding modes... {percent}%")
+                elif char == '\n':
+                    if "Performing search" in current_line: status_text.info("Executing BFGS optimization and spatial search...")
+                    elif "Refining" in current_line: status_text.info("Refining top structural poses...")
+                    current_line = ""
+                else:
+                    current_line += char
+            
+            process.wait()
+            if process.returncode == 0:
+                progress_bar.progress(100, text="Optimization complete!")
+                status_text.empty()
+                st.session_state.docking_results_raw = "".join(output_log)
+                time.sleep(0.8) 
+                st.rerun()
+            else:
+                status_text.empty()
+                st.error("Engine encountered a calculation error.")
+                st.code("".join(output_log))
+        except Exception as e:
+            st.error(f"Execution pipeline failed: {e}")
+    
+    # --- GLOBAL DATAFRAME ANALYTICS DISPLAY ZONE ---
+    if st.session_state.docking_results_raw is not None:
+        st.write("---")
+        st.header("📊 Screening Metrics Dashboard & Data Export")
+        
+        def parse_vina_output_with_residues(stdout_text):
+            data = []
+            pattern = re.compile(r"^\s*(\d+)\s+([-+]?\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)")
+            poses_dict = split_docking_poses("docking_poses.pdbqt")
+            for line in stdout_text.split("\n"):
+                match = pattern.match(line)
+                if match:
+                    mode_idx = int(match.group(1))
+                    res_string, bond_types = "N/A", "N/A"
+                    if mode_idx in poses_dict:
+                        ints = compute_spatial_interactions("protein.pdbqt", poses_dict[mode_idx])
+                        if ints:
+                            res_string = ", ".join(sorted(list(set([i["Residue Contact"] for i in ints]))))
+                            bond_types = ", ".join(sorted(list(set([i["Interaction Type"] for i in ints]))))
+                    data.append({
+                        "Binding Mode": mode_idx, 
+                        "Affinity (kcal/mol)": float(match.group(2)), 
+                        "RMSD l.b.": float(match.group(3)), 
+                        "RMSD u.b.": float(match.group(4)), 
+                        "Interacting Residues": res_string, 
+                        "Contact Bond Types": bond_types
+                    })
+            return pd.DataFrame(data)
+    
+        df_results = parse_vina_output_with_residues(st.session_state.docking_results_raw)
+        if not df_results.empty:
+            col_table, col_export = st.columns([2, 1])
+            with col_table: 
+                def color_positive_red(val):
+                    color = 'red' if val > 0 else 'black'
+                    return f'color: {color}'
+                
+                styled_df = df_results.style.map(color_positive_red, subset=['Affinity (kcal/mol)'])
+                st.dataframe(styled_df, hide_index=True, use_container_width=True)
+                
+            with col_export:
+                csv_data = df_results.to_csv(index=False).encode('utf-8')
+                st.download_button(label="📥 Download Data Sheet (.CSV)", data=csv_data, file_name="screening_affinity_report.csv", mime="text/csv", use_container_width=True)
+
+
+# ---------------------------------------------------------------------
+# PHASE 2: GENERATIVE SCAFFOLD STRUCTURAL REDESIGN STUDIO
+# ---------------------------------------------------------------------
+with tab2:
+    st.header("Generative Fragment Modification Matrix")
+    
+    if not st.session_state.smiles_cache:
+        st.warning("⚠️ Access Gated: Provide a valid pure SMILES sequence in Phase 1 to unlock the modification dashboard. Ensure you clicked 'Load Ligand Structure'.")
+    else:
+        cls_lbl, _ = get_dynamic_fragments(st.session_state.smiles_cache)
+        st.info(f"🧬 **Automated AI Scaffold Family Classification Ident: `{cls_lbl}`**")
+        
+        # --- SCIENTIFIC DISPLAY ADDITIONS ---
+        rec_id = st.session_state.pdb_id_display if st.session_state.pdb_id_display else "Local Structural Matrix"
+        st.markdown(f"> **Target Receptor Matrix (PDB ID):** `{rec_id}` <br> **Lead Drug Scaffold (SMILES):** `{st.session_state.smiles_cache}`", unsafe_allow_html=True)
+        st.markdown("*Scientific Execution Protocol: This module computationally redesigns the primary structural architecture of the parent drug via bioisosteric substitution. This aims to optimize steric fit and explicitly improve the thermodynamic binding affinity (ΔG) within the target receptor pocket.*")
+        
+        v_sites = find_valid_cleavage_sites(st.session_state.smiles_cache)
+        col_rd_p, col_rd_v = st.columns([1, 1])
+        
+        with col_rd_p:
+            rx_mode = st.radio("Select Transformation Chemical Mechanism Type:", ["True Covalent Substitution (Cleavage & Attachment)", "Co-Crystal / Salt Formulation (Non-Covalent)"], key="rx_mode_choice")
+            toggle_lbl = st.toggle("Overlay Atom Index Identification Matrix Trackers", value=True)
+            
+            if rx_mode == "True Covalent Substitution (Cleavage & Attachment)" and v_sites:
+                opts = {s["label"]: s["index"] for s in v_sites}
+                sel_lbl = st.selectbox("Isolate legal targeted atom intersection for array modification:", options=list(opts.keys()))
+                tgt_atom_idx = opts[sel_lbl]
+            else:
+                tgt_atom_idx = 0
+                st.info("Formulation mode: Fragment will co-crystallize without breaking chemical bonds.")
+                
+            if st.button("🚀 Generate Optimized Derivative Structural Library", type="primary"):
+                with st.spinner("Processing bioisosteric structural transformation loops..."):
+                    res = run_cleaving_engine(st.session_state.smiles_cache, tgt_atom_idx, rx_mode)
+                    if res:
+                        st.session_state.rd_library = pd.DataFrame(res)
+                        st.success(f"Successfully synthesized {len(res)} modified entries tracking baseline affinity data.")
+                        st.rerun()
+        
+        with col_rd_v:
+            b_img = generate_clean_2d_image(st.session_state.smiles_cache, include_labels=toggle_lbl, zoom_level=550)
+            if b_img: st.markdown(b_img, unsafe_allow_html=True)
+            
+        if st.session_state.rd_library is not None:
+            st.write("---")
+            st.subheader("Synthesized Structural Variant Optimization Array Data Track")
+            st.dataframe(st.session_state.rd_library[["Variant ID", "Fragment Added", "Redesigned SMILES", "Delta Score", "MW (g/mol)", "LogP"]], hide_index=True, use_container_width=True)
+
+
+# ---------------------------------------------------------------------
+# PHASE 3: ADMET PROFILING & AUTOMATED REPORT EXPERT INTERFACE
+# ---------------------------------------------------------------------
+with tab3:
+    st.header("ADMET 3.0 Pharmacokinetics Profiling & Comprehensive Research Record")
+    if st.session_state.rd_library is None:
+        st.warning("⚠️ Access Gated: Initialize generation matrices within Phase 2 to display complete profiling reports.")
+    else:
+        st.session_state.selected_variant_id = st.selectbox("Isolate synthesized structural entry to analyze pharmacokinetics metrics:", options=st.session_state.rd_library["Variant ID"])
+        
+        v_rows = st.session_state.rd_library[st.session_state.rd_library["Variant ID"] == st.session_state.selected_variant_id]
+        if not v_rows.empty:
+            v_row = v_rows.iloc[0]
+            curr_smiles = str(v_row["Redesigned SMILES"])
+            
+            with st.spinner("Compiling structural property descriptors..."):
+                iupac = get_iupac_name(curr_smiles)
+                adme_p = calculate_advanced_adme(st.session_state.smiles_cache)
+                adme_v = calculate_advanced_adme(curr_smiles)
+                
+                st.info(f"**Nomenclature Alignment Index (IUPAC Name):** `{iupac}`")
+                
+                with st.expander("📖 View ADMET Parameter Dictionary & Ideals", expanded=False):
+                    st.markdown("""
+                    * **TPSA (Topological Polar Surface Area):** Measures the surface sum over all polar atoms. Critical for estimating cell permeability. *Limit: ≤ 132 Å² for Intestinal Absorption, ≤ 79 Å² for Brain Penetration.*
+                    * **Volume (Å³):** The 3D spatial requirement of the molecule. Important for steric fit within a protein binding pocket. *Ideal Limit: 500 - 900 Å³.*
+                    * **MaxRing:** The size of the largest macrocyclic ring in the structure. Affects structural rigidity. *Ideal Limit: ≤ 7.*
+                    * **pKa (Acid/Base):** Predicts the ionization state at physiological pH (7.4).
+                    * **Melting Point (MP) / Boiling Point (BP):** Thermodynamic indicators. *High MP (> 200°C)* generally correlates with poor aqueous solubility.
+                    * **Lipinski's Rule of 5:** A rule of thumb to evaluate druglikeness. *Rules: MW ≤ 500, LogP ≤ 5, H-bond Donors ≤ 5, H-bond Acceptors ≤ 10.*
+                    """)
+
+                col_m1, col_m2 = st.columns([1, 1])
+                with col_m1:
+                    st.markdown("#### Structural Topology Footprint")
+                    v_2d = generate_clean_2d_image(curr_smiles, include_labels=False, zoom_level=420)
+                    if v_2d: st.markdown(v_2d, unsafe_allow_html=True)
+                    
+                with col_m2:
+                    st.markdown("#### Modeled Vibrational Footprint (FTIR Analysis)")
+                    ftir_b64 = generate_ftir_image(int(v_row["FTIR Peak"]))
+                    st.markdown(f'<img src="data:image/png;base64,{ftir_b64}" style="max-width:100%; border-radius:6px; border:1px solid #ddd;"/>', unsafe_allow_html=True)
+                
+                st.write("---")
+                st.subheader("Comparative Molecular Property Descriptors")
+                
+                comp_df = pd.DataFrame({
+                    "Physiochemical Bioproperty Descriptor": [
+                        "Lipinski Compliance?", "Oral Route Usability Profile", "Permeability Barrier Property",
+                        "Topological Polar Surface Area (TPSA)", "Molecular Spatial Volume (Å³)", "Rigidity Constraints (Max Ring Size)",
+                        "Lipophilic Distribution Tracker (LogP)", "pKa (Acidic)", "pKa (Basic)", "Thermodynamic Melting Boundaries (°C)"
+                    ],
+                    "Original Phytochemical Scaffold Matrix": [
+                        adme_p['Lipinski_Obey'], adme_p['Oral_Bio'], adme_p['Permeability'],
+                        f"{adme_p['TPSA']:.2f} Å²", f"{adme_p['Volume']:.1f} Å³", adme_p['MaxRing'], f"{adme_p['LogP']:.2f}", adme_p['pKa_Acid'], adme_p['pKa_Base'], f"{adme_p['MP']:.1f}"
+                    ],
+                    "Redesigned Structural Target Variant": [
+                        adme_v['Lipinski_Obey'], adme_v['Oral_Bio'], adme_v['Permeability'],
+                        f"{adme_v['TPSA']:.2f} Å²", f"{adme_v['Volume']:.1f} Å³", adme_v['MaxRing'], f"{adme_v['LogP']:.2f}", adme_v['pKa_Acid'], adme_v['pKa_Base'], f"{adme_v['MP']:.1f}"
+                    ]
+                })
+                st.dataframe(comp_df, hide_index=True, use_container_width=True)
+                
+                # Dynamic shift statement logic
+                vol_shift = adme_v['Volume'] - adme_p['Volume']
+                tpsa_shift = adme_v['TPSA'] - adme_p['TPSA']
+                logp_shift = adme_v['LogP'] - adme_p['LogP']
+                
+                shift_msg = f"Redesign workflow caused structural volume changes equal to **{vol_shift:.1f} Å³**. "
+                if tpsa_shift > 0: shift_msg += f"Polar group inclusion expanded topological polar parameters (TPSA) by **{tpsa_shift:.1f} Å²**. "
+                else: shift_msg += f"Polar reductions decreased surface topology metrics (TPSA) by **{abs(tpsa_shift):.1f} Å²**. "
+                
+                if adme_p['BBB'] and not adme_v['BBB']: shift_msg += "Critically: Modification successfully **restricts BBB access**, dropping central toxicity variables. "
+                elif not adme_p['BBB'] and adme_v['BBB']: shift_msg += "Critically: Modification **enables Blood-Brain Barrier (BBB) permeability**, unlocking potential central nervous target tracks. "
+                elif adme_v['BBB']: shift_msg += "The molecule successfully **retained its ability to cross the Blood-Brain Barrier (BBB)**. "
+                elif adme_v['HIA']: shift_msg += "The molecule remains restricted from the brain but **retains excellent Gastrointestinal (GI) absorption**. "
+                else: shift_msg += "The current modifications have unfortunately rendered the molecule **impermeable to both GI and BBB** barriers. "
+                
+                if logp_shift > 0.5: shift_msg += "A significant increase in lipophilicity (LogP) was observed, which may require formulation with lipid-based delivery systems to offset poor aqueous solubility. "
+                elif logp_shift < -0.5: shift_msg += "Furthermore, lipophilicity (LogP) was reduced, which is predicted to significantly improve aqueous solubility for oral formulation. "
+                
+                if adme_v['Violations'] < adme_p['Violations']: shift_msg += "\n\n📊 **Ecosystem Assessment Verdict: Favorable.** Positive optimization target track achieved. Candidate displays enhanced bioavailability compliance profiles over original master entry."
+                elif adme_v['Violations'] > adme_p['Violations']: shift_msg += "\n\n❌ **Ecosystem Assessment Verdict: Unfavorable.** Optimization mismatch. Structural modifications increased structural strain parameters above standard Druglikeness guidelines."
+                else: 
+                    if adme_v['Violations'] <= 1 and adme_v['Permeability'] != "Poor Absorption / Impermeable":
+                        shift_msg += "\n\n⚖️ **Ecosystem Assessment Verdict: Comparable.** Viable bioisosteric substitution analog established. Valid chemical structural configuration balance safely maintained."
+                    else:
+                        shift_msg += "\n\n⚠️ **Ecosystem Assessment Verdict: Comparable but Flawed.** Redesign does not significantly improve fundamental oral drug-likeness."
+                
+                st.success(shift_msg)
+                
+                # Report compilation deployment
+                st.write("---")
+                st.subheader("Data Export & Manuscript Support Systems")
+                
+                meta_data = extract_pdb_metadata(st.session_state.local_target_path, st.session_state.pdb_id_display) if st.session_state.local_target_path else {"id":"Custom","title":"Uploaded Structure File","method":"N/A","res":"N/A"}
+                b_img = generate_clean_2d_image(st.session_state.smiles_cache, include_labels=False, zoom_level=420)
+                html_report = build_comprehensive_html_report(
+                    meta_data, adme_p, adme_v, v_row, iupac, shift_msg, ftir_b64, v_2d, b_img
+                )
+                
+                st.download_button(
+                    label="📥 Download Consolidated Manuscript Quality HTML Research Report",
+                    data=html_report,
+                    file_name=f"InSilico_BioSphere_Research_Record_{v_row['Variant ID']}.html",
+                    mime="text/html",
+                    use_container_width=True
+                )
