@@ -167,7 +167,18 @@ def compute_spatial_interactions(receptor_file, ligand_pdbqt_str):
                 })
     return interactions
 
-
+st.header("2. Small Molecule Ligand Setup")
+    smiles_input_val = st.text_input("Enter Ligand SMILES String", "CC(=O)NC1=CC=C(O)C=C1").strip()
+    
+    if st.button("📥 Load Ligand Structure"):
+        if smiles_input_val:
+            pub_data = fetch_ligand_data_from_pubchem(smiles_input_val)
+            ok, _ = convert_smiles_to_pdbqt(smiles_input_val, "ligand.pdbqt")
+            if ok:
+                st.session_state.ligand_ready = True
+                st.session_state.active_smiles = smiles_input_val  # <-- ADD THIS LINE
+                st.success(f"Ligand loaded: {pub_data['name']}")
+                st.rerun()
 # --- BIOINFORMATICS STRUCTURAL CONVERTERS ---
 
 def fetch_pdb_from_rcsb(pdb_id):
