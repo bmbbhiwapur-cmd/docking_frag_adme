@@ -12,7 +12,7 @@ import streamlit.components.v1 as components
 import base64
 import io
 
-# --- CRITICAL FIX 1: FORCE MATPLOTLIB TO HEADLESS BACKEND TO PREVENT SERVER CRASHES ---
+# --- CRITICAL FIX 1: FORCE MATPLOTLIB TO HEADLESS BACKEND ---
 import matplotlib
 matplotlib.use('Agg') 
 import matplotlib.pyplot as plt
@@ -61,7 +61,6 @@ def initialize_session_states():
 
 initialize_session_states()
 
-# --- CRITICAL FIX 2: SAFE RERUN VERSION CONTROL FALLBACK ---
 def safe_rerun():
     try:
         st.rerun()
@@ -219,8 +218,14 @@ def convert_smiles_to_pdbqt(smiles_string, output_filename="ligand.pdbqt"):
         mol = Chem.MolFromSmiles(smiles_string)
         if mol is None: return False, "Invalid SMILES."
         mol = Chem.AddHs(mol)
-        AllChem.EmbedMolecule(mol, AllChem.ETKDGv3())
-        AllChem.MMFFOptimizeMolecule(mol)
+        # CRITICAL FIX 2: Safely embed 3D coords without crashing
+        res = AllChem.EmbedMolecule(mol, AllChem.ETKDGv3(), maxAttempts=10)
+        if res != 0:
+            AllChem.EmbedMolecule(mol, useRandomCoords=True)
+        try:
+            AllChem.MMFFOptimizeMolecule(mol)
+        except: pass
+        
         temp_pdb = "temp_ligand.pdb"
         Chem.MolToPDBFile(mol, temp_pdb)
         convert_pdb_to_pdbqt(temp_pdb, output_filename, is_ligand=True)
@@ -359,10 +364,10 @@ def run_cleaving_engine(parent_smiles, target_atom_idx, mechanism_mode):
     
     for idx, frag in enumerate(fragments):
         success = False
-        derived_smiles = ""
+        derived_smiles = f"{parent_smiles}.{frag['smiles']}"
+        route = "Non-covalent co-crystallization formulation (Safe Sandbox Mode)."
+        frag_name = frag["name"] + " (Sandbox Bypass)"
         
-        # --- CRITICAL FIX 3: RDKit Valency Crash Protection ---
-        # Only attempt dangerous RDKit mutations if Option B is selected
         if "True Structural Cleaving" in mechanism_mode:
             try:
                 rw_mol = Chem.RWMol(parent_mol)
@@ -388,20 +393,13 @@ def run_cleaving_engine(parent_smiles, target_atom_idx, mechanism_mode):
                     final_mol = replaced_mols[0]
                     Chem.SanitizeMol(final_mol)
                     derived_smiles = Chem.MolToSmiles(final_mol)
-                    if Chem.MolFromSmiles(derived_smiles): success = True
+                    if Chem.MolFromSmiles(derived_smiles): 
+                        success = True
+                        frag_name = frag["name"]
+                        route = frag["route"]
             except Exception: 
-                success = False # Catch the RDKit C++ crash silently
+                success = False # Soft fallback to sandbox if RDKit crashes
 
-        # If MockFrag Sandbox is selected, OR if True Cleaving failed, use the 100% safe fallback
-        if not success:
-            # Safely create a disconnected salt/co-crystal representation (100% crash-free)
-            derived_smiles = f"{parent_smiles}.{frag['smiles']}"
-            frag_name = frag["name"] + " (Sandbox Bypass)"
-            route = "Non-covalent co-crystallization formulation (Safe Sandbox Mode)."
-        else:
-            frag_name = frag["name"]
-            route = frag["route"]
-            
         test_mol = Chem.MolFromSmiles(derived_smiles)
         mw = round(Descriptors.MolWt(test_mol), 2) if test_mol else 0
         logp = round(Descriptors.MolLogP(test_mol), 2) if test_mol else 0
@@ -446,11 +444,11 @@ def calculate_advanced_adme(smiles):
         oral_bio = "Yes (High)" if violations == 0 else ("Yes (Moderate)" if violations == 1 else "No (Poor)")
         ring_info = mol.GetRingInfo().AtomRings()
         max_ring = max([len(r) for r in ring_info]) if ring_info else 0
-        try:
-            temp_mol = Chem.Mol(mol)
-            AllChem.EmbedMolecule(temp_mol, randomSeed=42)
-            vol = AllChem.ComputeMolVolume(temp_mol)
-        except: vol = mw * 0.88
+        
+        # --- CRITICAL FIX 3: BYPASS 3D EMBEDDING CRASH FOR DISCONNECTED MOLECULES ---
+        # 3D Embedding disconnected salts immediately segfaults Streamlit. 
+        # Using the standard 0.88 McGowan approximation guarantees 100% stability.
+        vol = float(mw) * 0.88 
             
         acidic_pka = "Neutral"
         if mol.HasSubstructMatch(Chem.MolFromSmarts("C(=O)[OH]")): acidic_pka = "Acidic (~4.5)"
@@ -642,6 +640,8 @@ st.header("🔒 Phase 1: Baseline Native Molecular Docking")
 
 col_params, col_visual = st.columns([1, 1])
 
+trigger_rerun = False
+
 with col_params:
     st.subheader("1. Target Protein Setup")
     protein_source = st.radio("Choose Protein Input Method:", ["Type 4-Letter PDB ID", "Upload File (.pdb or .pdbqt)"])
@@ -657,7 +657,7 @@ with col_params:
                     conv_ok, _ = convert_pdb_to_pdbqt(path, "protein.pdbqt")
                     st.session_state.target_ready = conv_ok
                     st.success(f"Protein {pdb_id_input.upper()} successfully loaded!")
-                    safe_rerun()
+                    trigger_rerun = True
                 else: st.error(path)
     else:
         uploaded_file = st.file_uploader("Upload Target Protein File", type=["pdb", "pdbqt"])
@@ -673,7 +673,7 @@ with col_params:
                 else:
                     os.replace(path, "protein.pdbqt")
                     st.session_state.target_ready = True
-                safe_rerun()
+                trigger_rerun = True
 
     if st.session_state.target_ready and st.session_state.local_target_path:
         meta = extract_pdb_metadata(st.session_state.local_target_path, st.session_state.pdb_id_display)
@@ -708,7 +708,7 @@ with col_params:
                             with open("ligand.pdbqt", "r") as f: st.session_state.serialized_ligand_block = f.read()
                             st.session_state.ligand_summary_text = f"**Name:** {pub_data['name']} | **Formula:** {pub_data['formula']} | **Molecular Weight:** {pub_data['mw']}"
                             st.success("Ligand metadata mapped from PubChem!")
-                            safe_rerun()
+                            trigger_rerun = True
                 except Exception as e: st.error(f"SMILES Parsing Failure: {e}")
                 
         elif ligand_source == "Upload Structural File (.pdb, .sdf)" and uploaded_lig_buffer is not None:
@@ -767,7 +767,7 @@ with col_params:
                 st.session_state.cx, st.session_state.cy, st.session_state.cz = chosen_target["cx"], chosen_target["cy"], chosen_target["cz"]
                 st.session_state.sx, st.session_state.sy, st.session_state.sz = chosen_target["bx"], chosen_target["by"], chosen_target["bz"]
                 st.success("Grid parameters aligned over pocket boundaries!")
-                safe_rerun()
+                trigger_rerun = True
 
     st.subheader("4. Search Space Mechanics (Grid Box)")
     
@@ -777,7 +777,7 @@ with col_params:
             st.session_state.cx, st.session_state.cy, st.session_state.cz = round(bcx, 1), round(bcy, 1), round(bcz, 1)
             st.session_state.sx, st.session_state.sy, st.session_state.sz = min(126, int(bsx)), min(126, int(bsy)), min(126, int(bsz))
             st.success("Grid parameters maximized to encapsulate the entire macromolecule!")
-            safe_rerun()
+            trigger_rerun = True
         else:
             st.warning("Please load a Target Protein first to calculate dimensions.")
 
@@ -990,7 +990,7 @@ if run_btn and can_dock:
             status_text.empty()
             st.session_state.docking_results_raw = "".join(output_log)
             time.sleep(0.8) 
-            safe_rerun()
+            trigger_rerun = True
         else:
             status_text.empty()
             st.error("Engine encountered a calculation error.")
@@ -1063,7 +1063,6 @@ else:
     col_rd_p, col_rd_v = st.columns([1, 1])
     
     with col_rd_p:
-        # --- CRITICAL FIX 4: Explicit Radio Options for Fallback Selection ---
         rx_mode = st.radio(
             "Select Optimization Processing Mode:", 
             [
@@ -1088,7 +1087,7 @@ else:
                 if res and len(res) > 0:
                     st.session_state.rd_library = pd.DataFrame(res)
                     st.success(f"Successfully synthesized {len(res)} modified entries tracking baseline affinity data.")
-                    safe_rerun()
+                    trigger_rerun = True
     
     with col_rd_v:
         b_img = generate_clean_2d_image(st.session_state.smiles_cache, include_labels=toggle_lbl, zoom_level=550)
@@ -1219,3 +1218,7 @@ else:
                 mime="text/html",
                 use_container_width=True
             )
+
+# Execute Rerun at the absolute bottom of the script to prevent rendering glitches
+if trigger_rerun:
+    safe_rerun()
