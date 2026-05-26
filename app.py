@@ -54,7 +54,9 @@ def initialize_session_states():
         "smiles_cache": "",
         "baseline_affinity": None,
         "rd_library": None,
-        "selected_variant_id": None
+        "selected_variant_id": None,
+        "style_mode": "cartoon",
+        "surf_toggle": False
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -588,12 +590,12 @@ def render_advanced_modeling_blueprint(receptor_data, ligand_data, mode="cartoon
     components.html(html_content, height=510)
 
 
-# --- CRITICAL FIX 2: FULL APP PAGE INJECTED REPORT ---
+# --- CRITICAL FIX 2: FULL APP PAGE INJECTED REPORT WITH STYLES ---
 def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, shift_msg, f_img, v_2d, p_2d, 
                                     smiles_cache, baseline_affinity, grid_params, df_results, df_int, 
-                                    receptor_data, ligand_pose_data, selected_pose):
+                                    receptor_data, ligand_pose_data, selected_pose, style_mode, show_surface):
     
-    # Pre-style the docking results table if there are positive affinities
+    # Pre-style the docking results table if there are positive/negative affinities
     if df_results is not None and not df_results.empty:
         res_html = '<table class="dataframe table"><thead><tr>'
         for col in df_results.columns: res_html += f'<th>{col}</th>'
@@ -602,7 +604,12 @@ def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, sh
             res_html += '<tr>'
             for col in df_results.columns:
                 val = row[col]
-                style = 'style="color: #c62828; font-weight: bold;"' if col == 'Affinity (kcal/mol)' and isinstance(val, (int, float)) and val > 0 else ''
+                style = ''
+                if col == 'Affinity (kcal/mol)' and isinstance(val, (int, float)):
+                    if val < 0:
+                        style = 'style="color: #10b981; font-weight: bold;"' # Green
+                    elif val > 0:
+                        style = 'style="color: #ef4444; font-weight: bold;"' # Red
                 res_html += f'<td {style}>{val}</td>'
             res_html += '</tr>'
         res_html += '</tbody></table>'
@@ -614,6 +621,16 @@ def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, sh
     # Safely escape strings for JS injection
     safe_rec = str(receptor_data).replace('`', '').replace('\\', '\\\\')
     safe_lig = str(ligand_pose_data).replace('`', '').replace('\\', '\\\\')
+
+    # Construct the correct styling JS string based on user's selected style_mode
+    if style_mode == 'cartoon':
+        style_js = "viewer.setStyle({model: 0}, {cartoon: {colorscheme: 'chain', style: 'oval', thickness: 0.6}});"
+    elif style_mode == 'spacefill':
+        style_js = "viewer.setStyle({model: 0}, {sphere: {colorscheme: 'chain', radius:1.1}});"
+    else:
+        style_js = "viewer.setStyle({model: 0}, {stick: {colorscheme: 'chain', radius:0.25}});"
+        
+    surface_js = "viewer.addSurface($3Dmol.SurfaceType.VDW, {opacity:0.45, colorscheme:{prop:'b',gradient:'rwb'}}, {model:0});" if show_surface else ""
     
     return f"""
     <!DOCTYPE html>
@@ -637,8 +654,8 @@ def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, sh
             table {{ width: 100%; border-collapse: collapse; font-size: 13px; min-width: 600px; }}
             th, td {{ border: 1px solid #e2e8f0; padding: 10px; text-align: left; }}
             th {{ background-color: #f8fafc; color: #1e3c72; font-weight: 600; }}
-            .structure-box {{ display: flex; gap: 30px; margin: 20px 0; background: #fafafa; padding: 20px; border-radius: 8px; border: 1px solid #eef2f7; align-items: center; }}
-            .structure-img {{ background: white; padding: 10px; border: 1px solid #e2e8f0; border-radius: 6px; max-width: 320px; text-align: center; }}
+            .structure-box {{ display: flex; gap: 30px; margin: 20px 0; background: #fafafa; padding: 20px; border-radius: 8px; border: 1px solid #eef2f7; align-items: center; justify-content: center; flex-wrap: wrap; }}
+            .structure-img {{ background: white; padding: 10px; border: 1px solid #e2e8f0; border-radius: 6px; max-width: 320px; text-align: center; margin: 0 auto; }}
             .scandata {{ font-family: monospace; background: #f1f5f9; padding: 3px 6px; border-radius: 4px; font-size: 13px; word-break: break-all; }}
             .summary-card {{ background-color: #ecfdf5; border-left: 5px solid #10b981; padding: 20px; border-radius: 6px; margin: 25px 0; color: #065f46; font-size: 14.5px; }}
             footer {{ text-align: center; padding: 20px; font-size: 12px; color: #64748b; margin-top: 5px; border-top: 1px solid #e2e8f0; }}
@@ -678,12 +695,13 @@ def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, sh
                 let lig_data = `{safe_lig}`;
                 if (rec_data.trim().length > 0) {{
                     viewer.addModel(rec_data, 'pdb');
-                    viewer.setStyle({{model: 0}}, {{cartoon: {{colorscheme: 'chain', style: 'oval', thickness: 0.6}}}});
+                    {style_js}
                 }}
                 if (lig_data.trim().length > 0) {{
                     viewer.addModel(lig_data, 'pdb');
                     viewer.setStyle({{model: 1}}, {{stick: {{colorscheme: 'greenCarbon', radius: 0.28}}}});
                 }}
+                {surface_js}
                 viewer.zoomTo(); 
                 viewer.render();
             </script>
@@ -702,12 +720,20 @@ def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, sh
             </div>
             
             <div class="structure-box">
-                <div class="structure-img">{v_2d}</div>
-                <div style="flex:1;">
-                    <h3>Redesigned Target SMILES String Matrix</h3>
-                    <div class="scandata" style="margin-bottom: 15px;">{variant_row['Redesigned SMILES']}</div>
-                    <strong>Pathway coordinates optimized via functional block swapping mechanics.</strong>
+                <div style="flex:1; text-align: center;">
+                    <h4 style="color:#1e3c72; margin-bottom:10px;">Original Phytochemical Lead</h4>
+                    <div class="structure-img">{p_2d}</div>
                 </div>
+                <div style="flex:1; text-align: center;">
+                    <h4 style="color:#1e3c72; margin-bottom:10px;">Optimized Derivative</h4>
+                    <div class="structure-img">{v_2d}</div>
+                </div>
+            </div>
+            
+            <div style="margin-bottom: 20px; padding: 10px; background: #fafafa; border-radius: 6px;">
+                <h3 style="margin-top:0;">Redesigned Target SMILES String Matrix</h3>
+                <div class="scandata" style="margin-bottom: 5px;">{variant_row['Redesigned SMILES']}</div>
+                <strong>Pathway coordinates optimized via functional block swapping mechanics.</strong>
             </div>
 
             <h2>5. ADMET 3.0 Pharmacokinetics Analysis</h2>
@@ -964,7 +990,6 @@ with col_visual:
         if os.path.exists("docking_poses.pdbqt"):
             parsed_poses = split_docking_poses("docking_poses.pdbqt")
             if parsed_poses:
-                # --- FIX 3: EXPLICIT SESSION STATE KEY FOR THE POSE DROPDOWN ---
                 selected_pose = st.selectbox("Choose Docking Pose to Visualize:", options=list(parsed_poses.keys()), format_func=lambda x: f"Mode {x} Pose Fit", key="selected_pose_export")
                 with open("protein.pdbqt", "r") as f: protein_data = f.read()
                 
@@ -1005,15 +1030,15 @@ with col_visual:
                 try:
                     affinity_val = float(pose_affinity_score)
                     if affinity_val > 0:
-                        affinity_color = "#d32f2f" 
-                        affinity_label = f"{pose_affinity_score} <span style='font-size:18px; font-weight:normal;'>kcal/mol <br><span style='color:#d32f2f; font-size:14px;'>(⚠️ Not Useful / No Binding)</span></span>"
-                        bg_color = "#ffebee" 
-                        border_color = "#d32f2f"
+                        affinity_color = "#ef4444" # Red
+                        affinity_label = f"{pose_affinity_score} <span style='font-size:18px; font-weight:normal;'>kcal/mol <br><span style='color:#ef4444; font-size:14px;'>(⚠️ Not Useful / No Binding)</span></span>"
+                        bg_color = "#fef2f2" 
+                        border_color = "#ef4444"
                     else:
-                        affinity_color = "#1b5e20" 
+                        affinity_color = "#10b981" # Green
                         affinity_label = f"{pose_affinity_score} <span style='font-size:18px; font-weight:normal;'>kcal/mol</span>"
-                        bg_color = "#f0f7f4" 
-                        border_color = "#2e7d32"
+                        bg_color = "#ecfdf5" 
+                        border_color = "#10b981"
                 except ValueError:
                     affinity_color = "#333"
                     affinity_label = "N/A"
@@ -1042,11 +1067,14 @@ with col_visual:
                 
                 col_render, col_mesh = st.columns([1, 1])
                 with col_render:
-                    style_mode = re.sub(r'\W+', '', st.radio("Macromolecule Style Mode:", ["Cartoon Ribbon Mesh", "Spacefill", "Sticks Profile"]).split()[0].lower())
+                    # Save style to session state so report exporter can use it
+                    style_choice = st.radio("Macromolecule Style Mode:", ["Cartoon Ribbon Mesh", "Spacefill", "Sticks Profile"])
+                    st.session_state.style_mode = re.sub(r'\W+', '', style_choice.split()[0].lower())
                 with col_mesh:
-                    surf_toggle = st.checkbox("Overlay Translucent Pocket Cavity Mesh", value=False)
+                    # Save toggle to session state
+                    st.session_state.surf_toggle = st.checkbox("Overlay Translucent Pocket Cavity Mesh", value=False)
                     
-                render_advanced_modeling_blueprint(receptor_data=protein_data, ligand_data=parsed_poses[selected_pose], mode=style_mode, show_surface=surf_toggle, interactions_list=active_interactions)
+                render_advanced_modeling_blueprint(receptor_data=protein_data, ligand_data=parsed_poses[selected_pose], mode=st.session_state.style_mode, show_surface=st.session_state.surf_toggle, interactions_list=active_interactions)
                 
                 st.markdown("#### 🧬 Local Contact Residues & Bond Assignments Matrix")
                 if active_interactions:
@@ -1137,14 +1165,21 @@ if st.session_state.docking_results_raw is not None:
     if not df_results.empty:
         col_table, col_export = st.columns([2, 1])
         with col_table: 
-            def color_positive_red(val):
-                color = 'red' if val > 0 else 'black'
-                return f'color: {color}'
+            # Apply green for negative, red for positive
+            def color_affinity(val):
+                try:
+                    v = float(val)
+                    if v < 0:
+                        return 'color: #10b981; font-weight: bold;'
+                    elif v > 0:
+                        return 'color: #ef4444; font-weight: bold;'
+                except: pass
+                return 'color: black'
             
             try:
-                styled_df = df_results.style.map(color_positive_red, subset=['Affinity (kcal/mol)'])
+                styled_df = df_results.style.map(color_affinity, subset=['Affinity (kcal/mol)'])
             except AttributeError:
-                styled_df = df_results.style.applymap(color_positive_red, subset=['Affinity (kcal/mol)'])
+                styled_df = df_results.style.applymap(color_affinity, subset=['Affinity (kcal/mol)'])
             st.dataframe(styled_df, hide_index=True, use_container_width=True)
             
         with col_export:
@@ -1346,7 +1381,8 @@ else:
                 f_img=ftir_b64, v_2d=v_2d, p_2d=b_img, smiles_cache=st.session_state.smiles_cache, 
                 baseline_affinity=st.session_state.baseline_affinity, grid_params=grid_params, 
                 df_results=df_results if 'df_results' in locals() else None, 
-                df_int=df_int, receptor_data=receptor_data, ligand_pose_data=ligand_pose_data, selected_pose=selected_pose_export
+                df_int=df_int, receptor_data=receptor_data, ligand_pose_data=ligand_pose_data, selected_pose=selected_pose_export,
+                style_mode=st.session_state.style_mode, show_surface=st.session_state.surf_toggle
             )
             
             st.download_button(
