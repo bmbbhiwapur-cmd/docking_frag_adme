@@ -40,6 +40,7 @@ ensure_linux_vina_exists()
 
 def initialize_session_states():
     defaults = {
+        "protein_name": "Unknown Protein",
         "cx": 0.0, "cy": 0.0, "cz": 0.0,
         "sx": 20, "sy": 20, "sz": 20,
         "exhaustiveness": 8,
@@ -99,7 +100,8 @@ def fetch_ligand_data_from_pubchem(smiles_string):
 
 def extract_pdb_metadata(file_path, pdb_id="Custom"):
     meta = {
-        "title": "Uploaded Protein Structure Matrix", "id": pdb_id.upper(),
+        "name": "Unknown Protein",
+        "title": "Uploaded Protein Structure Matrix", "id": pdb_id.upper() if pdb_id and pdb_id != "Uploaded File" else "Unknown",
         "class": "Unknown Classification", "organism": "Unknown",
         "system": "Unknown Expression System", "method": "X-RAY DIFFRACTION", "res": "N/A"
     }
@@ -109,7 +111,17 @@ def extract_pdb_metadata(file_path, pdb_id="Custom"):
             title_parts = []
             for line in f:
                 if line.startswith("TITLE"): title_parts.append(line[10:80].strip())
-                elif line.startswith("HEADER"): meta["class"] = line[10:50].strip().title()
+                elif line.startswith("HEADER"): 
+                    meta["class"] = line[10:50].strip().title()
+                    if len(line) >= 66:
+                        possible_id = line[62:66].strip()
+                        if len(possible_id) == 4:
+                            meta["id"] = possible_id.upper()
+                elif line.startswith("COMPND"):
+                    if "MOLECULE:" in line:
+                        mol_name = line.split("MOLECULE:")[1].split(";")[0].strip()
+                        if meta["name"] == "Unknown Protein":
+                            meta["name"] = mol_name.title()
                 elif "ORGANISM_SCIENTIFIC" in line: meta["organism"] = line.split(":")[-1].replace(";","").strip()
                 elif "EXPRESSION_SYSTEM" in line: meta["system"] = line.split(":")[-1].replace(";","").strip()
                 elif line.startswith("EXPDTA"): meta["method"] = line[10:80].strip()
@@ -117,6 +129,8 @@ def extract_pdb_metadata(file_path, pdb_id="Custom"):
                     match = re.search(r"(\d+\.\d+)", line)
                     if match: meta["res"] = f"{match.group(1)} Å"
         if title_parts: meta["title"] = " ".join(title_parts).title()
+        if meta["name"] == "Unknown Protein" and meta["title"] != "Uploaded Protein Structure Matrix":
+            meta["name"] = meta["title"]
     except Exception: pass
     return meta
 
@@ -579,7 +593,22 @@ def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, sh
                                     smiles_cache, baseline_affinity, grid_params, df_results, df_int, 
                                     receptor_data, ligand_pose_data, selected_pose):
     
-    res_html = df_results.to_html(index=False, classes="dataframe table") if df_results is not None else "<p>No docking data.</p>"
+    # Pre-style the docking results table if there are positive affinities
+    if df_results is not None and not df_results.empty:
+        res_html = '<table class="dataframe table"><thead><tr>'
+        for col in df_results.columns: res_html += f'<th>{col}</th>'
+        res_html += '</tr></thead><tbody>'
+        for _, row in df_results.iterrows():
+            res_html += '<tr>'
+            for col in df_results.columns:
+                val = row[col]
+                style = 'style="color: #c62828; font-weight: bold;"' if col == 'Affinity (kcal/mol)' and isinstance(val, (int, float)) and val > 0 else ''
+                res_html += f'<td {style}>{val}</td>'
+            res_html += '</tr>'
+        res_html += '</tbody></table>'
+    else:
+        res_html = "<p>No docking data.</p>"
+
     int_html = df_int.to_html(index=False, classes="dataframe table") if df_int is not None and not df_int.empty else "<p>No close contacts detected.</p>"
     
     # Safely escape strings for JS injection
@@ -625,6 +654,7 @@ def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, sh
         <div class="container">
             <h2>1. Baseline Docking Configuration & Target Matrix</h2>
             <div class="meta-grid">
+                <div class="meta-item"><strong>Target Protein Name:</strong> {meta['name']}</div>
                 <div class="meta-item"><strong>Target PDB ID:</strong> {meta['id']}</div>
                 <div class="meta-item"><strong>Method / Resolution:</strong> {meta['method']} ({meta['res']})</div>
                 <div class="meta-item"><strong>Lead Phytochemical (SMILES):</strong> <span class="scandata">{smiles_cache}</span></div>
@@ -710,7 +740,11 @@ def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, sh
             </div>
         </div>
         <footer>
-            InSilico BioSphere System Technical Report | copyright@sarang dhote | All Rights Reserved.
+            <p>Report compiled successfully. Ready for manuscript citation.</p>
+            <p>InSilico BioSphere: An Integrated Platform for Automated Molecular Docking.</p>
+            <p>Developed by Mr. Sarang S. Dhote, Assistant Professor, Department of Chemistry,<br>
+            Shivaji Science College, Nagpur, India.<br>
+            Email: contact - sarangresearch@gmail.com</p>
         </footer>
     </body>
     </html>
@@ -744,6 +778,15 @@ trigger_rerun = False
 
 with col_params:
     st.subheader("1. Target Protein Setup")
+    
+    # --- TEXT BOXES FOR PROTEIN IDENTIFICATION ---
+    current_p_name = st.text_input("Protein Name", placeholder="Hint: Type protein name here...", value=st.session_state.protein_name)
+    current_p_id = st.text_input("PDB ID / Code", placeholder="Hint: Type PDB ID here...", value=st.session_state.pdb_id_display)
+    
+    if current_p_name != st.session_state.protein_name: st.session_state.protein_name = current_p_name
+    if current_p_id != st.session_state.pdb_id_display: st.session_state.pdb_id_display = current_p_id
+    st.write("---")
+    
     protein_source = st.radio("Choose Protein Input Method:", ["Type 4-Letter PDB ID", "Upload File (.pdb or .pdbqt)"])
     
     if protein_source == "Type 4-Letter PDB ID":
@@ -753,7 +796,9 @@ with col_params:
                 success, path = fetch_pdb_from_rcsb(pdb_id_input)
                 if success:
                     st.session_state.local_target_path = path
-                    st.session_state.pdb_id_display = pdb_id_input.upper()
+                    meta = extract_pdb_metadata(path, pdb_id_input.upper())
+                    st.session_state.pdb_id_display = meta["id"]
+                    st.session_state.protein_name = meta["name"]
                     conv_ok, _ = convert_pdb_to_pdbqt(path, "protein.pdbqt")
                     st.session_state.target_ready = conv_ok
                     st.success(f"Protein {pdb_id_input.upper()} successfully loaded!")
@@ -766,7 +811,9 @@ with col_params:
             if st.session_state.local_target_path != path:
                 with open(path, "wb") as f: f.write(uploaded_file.getbuffer())
                 st.session_state.local_target_path = path
-                st.session_state.pdb_id_display = "Uploaded File"
+                meta = extract_pdb_metadata(path, "Uploaded File")
+                st.session_state.pdb_id_display = meta["id"]
+                st.session_state.protein_name = meta["name"]
                 if uploaded_file.name.endswith(".pdb"):
                     conv_ok, _ = convert_pdb_to_pdbqt(path, "protein.pdbqt")
                     st.session_state.target_ready = conv_ok
@@ -777,7 +824,7 @@ with col_params:
 
     if st.session_state.target_ready and st.session_state.local_target_path:
         meta = extract_pdb_metadata(st.session_state.local_target_path, st.session_state.pdb_id_display)
-        st.markdown(f"> **Protein Summary Profile:** \n> * **Title:** {meta['title']} \n> * **PDB ID:** `{meta['id']}` | **Classification:** {meta['class']} \n> * **Resolution:** **{meta['res']}**")
+        st.markdown(f"> **Protein Summary Profile:** \n> * **Protein Name:** **{st.session_state.protein_name}** \n> * **Title:** {meta['title']} \n> * **PDB ID:** `{st.session_state.pdb_id_display}` | **Classification:** {meta['class']} \n> * **Resolution:** **{meta['res']}**")
 
     st.subheader("2. Small Molecule Ligand Setup")
     ligand_source = st.radio("Choose Ligand Input Method:", ["SMILES String Input", "Upload Structural File (.pdb, .sdf)"])
@@ -1094,7 +1141,10 @@ if st.session_state.docking_results_raw is not None:
                 color = 'red' if val > 0 else 'black'
                 return f'color: {color}'
             
-            styled_df = df_results.style.map(color_positive_red, subset=['Affinity (kcal/mol)'])
+            try:
+                styled_df = df_results.style.map(color_positive_red, subset=['Affinity (kcal/mol)'])
+            except AttributeError:
+                styled_df = df_results.style.applymap(color_positive_red, subset=['Affinity (kcal/mol)'])
             st.dataframe(styled_df, hide_index=True, use_container_width=True)
             
         with col_export:
@@ -1266,6 +1316,11 @@ else:
             
             # --- CRITICAL FIX 4: PASSING ALL DATA INTO THE REPORT ---
             meta_data = extract_pdb_metadata(st.session_state.local_target_path, st.session_state.pdb_id_display) if st.session_state.local_target_path else {"id":"Custom","title":"Uploaded Structure File","method":"N/A","res":"N/A"}
+            
+            # Ensure the user's manually typed values get passed to the HTML export:
+            meta_data['name'] = st.session_state.protein_name
+            meta_data['id'] = st.session_state.pdb_id_display
+
             b_img = generate_clean_2d_image(st.session_state.smiles_cache, include_labels=False, zoom_level=420)
             
             grid_params = {
