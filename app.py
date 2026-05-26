@@ -49,10 +49,12 @@ def initialize_session_states():
         "local_target_path": None,
         "pdb_id_display": "Custom",
         "docking_results_raw": None,
+        "redesign_docking_results_raw": None,
         "serialized_ligand_block": None,
         "ligand_summary_text": "",
         "smiles_cache": "",
         "baseline_affinity": None,
+        "redesign_baseline_affinity": None,
         "rd_library": None,
         "selected_variant_id": None,
         "style_mode": "cartoon",
@@ -314,6 +316,13 @@ def split_docking_poses(poses_file_path):
             else: current_lines.append(line)
     return poses
 
+def get_pose_affinity(stdout_text, idx):
+    if not stdout_text: return "N/A"
+    for line in stdout_text.split("\n"):
+        m = re.match(r"^\s*(\d+)\s+([-+]?\d+\.\d+)", line)
+        if m and int(m.group(1)) == idx: return m.group(2)
+    return "N/A"
+
 # =====================================================================
 # 3. FRAGMENTATION & ADVANCED ADME MODULE
 # =====================================================================
@@ -547,44 +556,44 @@ def generate_ftir_image(target_peak):
     plt.close(fig)
     return base64.b64encode(buf.getvalue()).decode()
 
-def render_advanced_modeling_blueprint(receptor_data, ligand_data, mode="cartoon", show_surface=False, interactions_list=[]):
-    surface_js = "viewer.addSurface($3Dmol.SurfaceType.VDW, {opacity:0.45, colorscheme:{prop:'b',gradient:'rwb'}}, {model:0});" if show_surface else ""
+def render_advanced_modeling_blueprint(receptor_data, ligand_data, mode="cartoon", show_surface=False, interactions_list=[], unique_id="container"):
+    surface_js = f"viewer_{unique_id}.addSurface($3Dmol.SurfaceType.VDW, {{opacity:0.45, colorscheme:{{prop:'b',gradient:'rwb'}}}}, {{model:0}});" if show_surface else ""
     int_lines_js = ""
     for interact in interactions_list:
         rc = interact["r_coord"]
         lc = interact["l_coord"]
         color = "yellow" if "Hydrogen" in interact["Interaction Type"] else "cyan"
         int_lines_js += f"""
-        viewer.addCylinder({{start:{{x:{rc[0]}, y:{rc[1]}, z:{rc[2]}}}, end:{{x:{lc[0]}, y:{lc[1]}, z:{lc[2]}}}, radius:0.07, color:'{color}', dashed:true}});
-        viewer.addLabel("{interact['Residue Contact']} ({interact['Distance (Å)']}A)", {{position:{{x:{rc[0]}, y:{rc[1]}, z:{rc[2]}}}, backgroundColor:'white', fontColor:'black', backgroundOpacity:0.8, fontSize:11}});
+        viewer_{unique_id}.addCylinder({{start:{{x:{rc[0]}, y:{rc[1]}, z:{rc[2]}}}, end:{{x:{lc[0]}, y:{lc[1]}, z:{lc[2]}}}, radius:0.07, color:'{color}', dashed:true}});
+        viewer_{unique_id}.addLabel("{interact['Residue Contact']} ({interact['Distance (Å)']}A)", {{position:{{x:{rc[0]}, y:{rc[1]}, z:{rc[2]}}}, backgroundColor:'white', fontColor:'black', backgroundOpacity:0.8, fontSize:11}});
         """
     html_content = f"""
-    <div id="wrapper_div" style="position:relative; width:100%;">
-        <button onclick="toggleFullScreen()" style="position:absolute; top:12px; right:12px; z-index:9999; padding:6px 12px; background:#007bff; color:white; border:none; border-radius:4px; cursor:pointer; font-weight:bold; box-shadow:0 2px 4px rgba(0,0,0,0.15);">🖥 Fullscreen View</button>
-        <div id="container" style="height: 480px; width: 100%; position: relative; border-radius:10px; border:1px solid #eaeaea; background:#ffffff;"></div>
+    <div id="wrapper_{unique_id}" style="position:relative; width:100%;">
+        <button onclick="toggleFullScreen_{unique_id}()" style="position:absolute; top:12px; right:12px; z-index:9999; padding:6px 12px; background:#007bff; color:white; border:none; border-radius:4px; cursor:pointer; font-weight:bold; box-shadow:0 2px 4px rgba(0,0,0,0.15);">🖥 Fullscreen View</button>
+        <div id="{unique_id}" style="height: 480px; width: 100%; position: relative; border-radius:10px; border:1px solid #eaeaea; background:#ffffff;"></div>
     </div>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/3Dmol/2.0.4/3Dmol-min.js"></script>
     <script>
-        let viewer = $3Dmol.createViewer(document.getElementById('container'), {{backgroundColor: '#ffffff'}});
+        let viewer_{unique_id} = $3Dmol.createViewer(document.getElementById('{unique_id}'), {{backgroundColor: '#ffffff'}});
         if (`{receptor_data}`.trim().length > 0) {{
-            viewer.addModel(`{receptor_data}`, 'pdb');
-            if ('{mode}' === 'cartoon') {{ viewer.setStyle({{model: 0}}, {{cartoon: {{colorscheme: 'chain', style: 'oval', thickness: 0.6}}}}); }} 
-            else if ('{mode}' === 'spacefill') {{ viewer.setStyle({{model: 0}}, {{sphere: {{colorscheme: 'chain', radius:1.1}}}}); }} 
-            else {{ viewer.setStyle({{model: 0}}, {{stick: {{colorscheme: 'chain', radius:0.25}}}}); }}
+            viewer_{unique_id}.addModel(`{receptor_data}`, 'pdb');
+            if ('{mode}' === 'cartoon') {{ viewer_{unique_id}.setStyle({{model: 0}}, {{cartoon: {{colorscheme: 'chain', style: 'oval', thickness: 0.6}}}}); }} 
+            else if ('{mode}' === 'spacefill') {{ viewer_{unique_id}.setStyle({{model: 0}}, {{sphere: {{colorscheme: 'chain', radius:1.1}}}}); }} 
+            else {{ viewer_{unique_id}.setStyle({{model: 0}}, {{stick: {{colorscheme: 'chain', radius:0.25}}}}); }}
         }}
         {surface_js}
         if (`{ligand_data}`.trim().length > 0) {{
-            viewer.addModel(`{ligand_data}`, 'pdb');
-            viewer.setStyle({{model: 1}}, {{stick: {{colorscheme: 'greenCarbon', radius: 0.28}}}});
+            viewer_{unique_id}.addModel(`{ligand_data}`, 'pdb');
+            viewer_{unique_id}.setStyle({{model: 1}}, {{stick: {{colorscheme: 'greenCarbon', radius: 0.28}}}});
         }}
         {int_lines_js}
-        viewer.zoomTo(); viewer.render();
-        function toggleFullScreen() {{
-            let elem = document.getElementById("wrapper_div");
-            if (!document.fullscreenElement) {{ elem.requestFullscreen(); document.getElementById("container").style.height = "90vh"; }}
-            else {{ document.exitFullscreen(); document.getElementById("container").style.height = "480px"; }}
+        viewer_{unique_id}.zoomTo(); viewer_{unique_id}.render();
+        function toggleFullScreen_{unique_id}() {{
+            let elem = document.getElementById("wrapper_{unique_id}");
+            if (!document.fullscreenElement) {{ elem.requestFullscreen(); document.getElementById("{unique_id}").style.height = "90vh"; }}
+            else {{ document.exitFullscreen(); document.getElementById("{unique_id}").style.height = "480px"; }}
         }}
-        document.addEventListener('fullscreenchange', () => {{ if (!document.fullscreenElement) document.getElementById("container").style.height = "480px"; }});
+        document.addEventListener('fullscreenchange', () => {{ if (!document.fullscreenElement) document.getElementById("{unique_id}").style.height = "480px"; }});
     </script>
     """
     components.html(html_content, height=510)
@@ -593,7 +602,8 @@ def render_advanced_modeling_blueprint(receptor_data, ligand_data, mode="cartoon
 # --- CRITICAL FIX 2: FULL APP PAGE INJECTED REPORT WITH STYLES ---
 def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, shift_msg, f_img, v_2d, p_2d, 
                                     smiles_cache, baseline_affinity, grid_params, df_results, df_int, 
-                                    receptor_data, ligand_pose_data, selected_pose, style_mode, show_surface):
+                                    receptor_data, ligand_pose_data, selected_pose, style_mode, show_surface,
+                                    master_verdict, df_comparison_html):
     
     # Pre-style the docking results table if there are positive/negative affinities
     if df_results is not None and not df_results.empty:
@@ -658,6 +668,7 @@ def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, sh
             .structure-img {{ background: white; padding: 10px; border: 1px solid #e2e8f0; border-radius: 6px; max-width: 320px; text-align: center; margin: 0 auto; }}
             .scandata {{ font-family: monospace; background: #f1f5f9; padding: 3px 6px; border-radius: 4px; font-size: 13px; word-break: break-all; }}
             .summary-card {{ background-color: #ecfdf5; border-left: 5px solid #10b981; padding: 20px; border-radius: 6px; margin: 25px 0; color: #065f46; font-size: 14.5px; }}
+            .verdict-card {{ background-color: #fffbeb; border-left: 5px solid #f59e0b; padding: 20px; border-radius: 6px; margin: 25px 0; color: #92400e; font-size: 15px; font-weight: bold; }}
             footer {{ text-align: center; padding: 20px; font-size: 12px; color: #64748b; margin-top: 5px; border-top: 1px solid #e2e8f0; }}
         </style>
     </head>
@@ -764,6 +775,18 @@ def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, sh
             <div style="text-align: center; margin: 20px 0;">
                 <img src="data:image/png;base64,{f_img}" style="max-width:100%; border-radius:6px; border: 1px solid #e2e8f0;"/>
             </div>
+            
+            <h2>6. Post-Redesign Validation Docking & Master Synthesis Verdict</h2>
+            <p>Comparing Original Lead vs. Optimized Derivative inside the Target Receptor Pocket.</p>
+            <div class="table-wrapper">
+                {df_comparison_html}
+            </div>
+            
+            <h3>Master Executive Summary</h3>
+            <div class="verdict-card">
+                {master_verdict}
+            </div>
+            
         </div>
         <footer>
             <p>Report compiled successfully. Ready for manuscript citation.</p>
@@ -787,7 +810,7 @@ st.markdown("**Developed by: Dr. Sarang S. Dhote, Assistant Professor, Departmen
 # Master Reset
 if st.button("🔄 Reset Entire Environment", type="secondary", use_container_width=True):
     for key in list(st.session_state.keys()): del st.session_state[key]
-    for f in ["protein.pdbqt", "ligand.pdbqt", "docking_poses.pdbqt", "temp_lig_state.pdb"]:
+    for f in ["protein.pdbqt", "ligand.pdbqt", "docking_poses.pdbqt", "temp_lig_state.pdb", "redesign_ligand.pdbqt", "redesign_docking_poses.pdbqt"]:
         if os.path.exists(f): os.remove(f)
     st.success("Dashboard cache and runtime structures completely cleared!")
     safe_rerun()
@@ -975,7 +998,7 @@ with col_visual:
             receptor_view_data = ""
             if st.session_state.target_ready and os.path.exists("protein.pdbqt"):
                 with open("protein.pdbqt", "r") as f: receptor_view_data = f.read()
-            render_advanced_modeling_blueprint(receptor_view_data, st.session_state.serialized_ligand_block, mode="cartoon")
+            render_advanced_modeling_blueprint(receptor_view_data, st.session_state.serialized_ligand_block, mode="cartoon", unique_id="container_phase1")
         with view_tabs[1]:
             if st.session_state.ligand_ready and st.session_state.smiles_cache:
                 try:
@@ -992,12 +1015,6 @@ with col_visual:
             if parsed_poses:
                 selected_pose = st.selectbox("Choose Docking Pose to Visualize:", options=list(parsed_poses.keys()), format_func=lambda x: f"Mode {x} Pose Fit", key="selected_pose_export")
                 with open("protein.pdbqt", "r") as f: protein_data = f.read()
-                
-                def get_pose_affinity(stdout_text, idx):
-                    for line in stdout_text.split("\n"):
-                        m = re.match(r"^\s*(\d+)\s+([-+]?\d+\.\d+)", line)
-                        if m and int(m.group(1)) == idx: return m.group(2)
-                    return "N/A"
                 
                 pose_affinity_score = get_pose_affinity(st.session_state.docking_results_raw, selected_pose)
                 
@@ -1067,14 +1084,12 @@ with col_visual:
                 
                 col_render, col_mesh = st.columns([1, 1])
                 with col_render:
-                    # Save style to session state so report exporter can use it
                     style_choice = st.radio("Macromolecule Style Mode:", ["Cartoon Ribbon Mesh", "Spacefill", "Sticks Profile"])
                     st.session_state.style_mode = re.sub(r'\W+', '', style_choice.split()[0].lower())
                 with col_mesh:
-                    # Save toggle to session state
                     st.session_state.surf_toggle = st.checkbox("Overlay Translucent Pocket Cavity Mesh", value=False)
                     
-                render_advanced_modeling_blueprint(receptor_data=protein_data, ligand_data=parsed_poses[selected_pose], mode=st.session_state.style_mode, show_surface=st.session_state.surf_toggle, interactions_list=active_interactions)
+                render_advanced_modeling_blueprint(receptor_data=protein_data, ligand_data=parsed_poses[selected_pose], mode=st.session_state.style_mode, show_surface=st.session_state.surf_toggle, interactions_list=active_interactions, unique_id="container_phase1_result")
                 
                 st.markdown("#### 🧬 Local Contact Residues & Bond Assignments Matrix")
                 if active_interactions:
@@ -1165,7 +1180,6 @@ if st.session_state.docking_results_raw is not None:
     if not df_results.empty:
         col_table, col_export = st.columns([2, 1])
         with col_table: 
-            # Apply green for negative, red for positive
             def color_affinity(val):
                 try:
                     v = float(val)
@@ -1345,17 +1359,166 @@ else:
                 shift_msg = "⚠️ Ecosystem Assessment Verdict: Chemical structure too strained to calculate definitive ADMET shift comparisons."
                 
             st.success(shift_msg)
+
+# ---------------------------------------------------------------------
+# PHASE 4: POST-REDESIGN VALIDATION DOCKING & MASTER SYNTHESIS
+# ---------------------------------------------------------------------
+st.write("---")
+st.write("---")
+st.header("🎯 Phase 4: Post-Redesign Validation Docking & Master Synthesis")
+
+if st.session_state.rd_library is None or st.session_state.rd_library.empty or not st.session_state.target_ready:
+    st.warning("⚠️ Access Gated: Complete Phase 1 Docking and Phase 2/3 Redesign to unlock validation module.")
+else:
+    st.markdown("*Verify thermodynamic binding improvements of the isolated derivative directly against the target receptor.*")
+    
+    col_p4_1, col_p4_2 = st.columns([1, 1])
+    with col_p4_1:
+        st.subheader("1. Inherit Structural Data")
+        if st.button("🔄 Pull Receptor & Phase 3 Derivative", type="secondary"):
+            v_rows = st.session_state.rd_library[st.session_state.rd_library["Variant ID"] == st.session_state.selected_variant_id]
+            if not v_rows.empty:
+                new_smiles = str(v_rows.iloc[0]["Redesigned SMILES"])
+                ok, msg = convert_smiles_to_pdbqt(new_smiles, "redesign_ligand.pdbqt")
+                if ok:
+                    st.success(f"Derivative `{st.session_state.selected_variant_id}` securely converted to 3D matrix.")
+                    st.session_state.redesign_docking_results_raw = None
+                else:
+                    st.error(f"3D Embedding Failed: {msg}")
+                    
+        st.markdown(f"> **Target Receptor:** `{st.session_state.pdb_id_display}` <br> **Active Derivative:** `{st.session_state.selected_variant_id}`", unsafe_allow_html=True)
+        
+    with col_p4_2:
+        st.subheader("2. Execute Validation Docking")
+        grid_mode = st.radio("Grid Box Selection:", ["Use Phase 1 Grid Box Parameters (Recommended for 1:1 Validation)", "Auto-Configure Blind Docking"], key="p4_grid")
+        
+        can_run_p4 = os.path.exists("protein.pdbqt") and os.path.exists("redesign_ligand.pdbqt")
+        if st.button("🚀 Initialize Validation Docking Engine", type="primary", disabled=not can_run_p4):
+            # Setup Grid
+            if "Blind" in grid_mode:
+                p4_cx, p4_cy, p4_cz, p4_sx, p4_sy, p4_sz = compute_protein_bounding_box("protein.pdbqt")
+            else:
+                p4_cx, p4_cy, p4_cz = st.session_state.cx, st.session_state.cy, st.session_state.cz
+                p4_sx, p4_sy, p4_sz = st.session_state.sx, st.session_state.sy, st.session_state.sz
+                
+            vina_path = os.path.abspath("vina")
+            vina_command = [
+                vina_path, "--receptor", "protein.pdbqt", "--ligand", "redesign_ligand.pdbqt", 
+                "--center_x", str(p4_cx), "--center_y", str(p4_cy), "--center_z", str(p4_cz), 
+                "--size_x", str(int(p4_sx)), "--size_y", str(int(p4_sy)), "--size_z", str(int(p4_sz)), 
+                "--exhaustiveness", str(st.session_state.exhaustiveness), "--out", "redesign_docking_poses.pdbqt"
+            ]
             
+            p4_prog = st.progress(0, text="Validating new derivative...")
+            p4_stat = st.empty()
+            try:
+                process = subprocess.Popen(vina_command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                output_log = []
+                p_count = 0
+                c_line = ""
+                while True:
+                    char = process.stdout.read(1).decode("utf-8", errors="ignore")
+                    if not char: break
+                    output_log.append(char)
+                    if char == '*':
+                        p_count += 1
+                        p4_prog.progress(min(100, int((p_count / 50) * 100)), text="Exploring optimized binding modes...")
+                    elif char == '\n':
+                        if "Refining" in c_line: p4_stat.info("Refining derivative poses...")
+                        c_line = ""
+                    else: c_line += char
+                process.wait()
+                if process.returncode == 0:
+                    p4_prog.progress(100, text="Validation complete!")
+                    p4_stat.empty()
+                    st.session_state.redesign_docking_results_raw = "".join(output_log)
+                    trigger_rerun = True
+                else:
+                    p4_stat.empty()
+                    st.error("Engine failed during validation.")
+            except Exception as e:
+                st.error(f"Validation pipeline error: {e}")
+
+    # Results Display
+    if st.session_state.redesign_docking_results_raw is not None and os.path.exists("redesign_docking_poses.pdbqt"):
+        st.write("---")
+        st.subheader("3. Validation Complex Analysis")
+        p4_poses = split_docking_poses("redesign_docking_poses.pdbqt")
+        if p4_poses:
+            p4_sel_pose = st.selectbox("Select Derivative Binding Pose:", options=list(p4_poses.keys()), format_func=lambda x: f"Derivative Pose {x}", key="p4_pose_sel")
+            
+            # Extract Affinities
+            orig_aff = st.session_state.baseline_affinity
+            new_aff_str = get_pose_affinity(st.session_state.redesign_docking_results_raw, p4_sel_pose)
+            
+            try: 
+                new_aff = float(new_aff_str)
+                st.session_state.redesign_baseline_affinity = new_aff
+            except: new_aff = 0.0
+
+            # Compare Data
+            orig_pose = split_docking_poses("docking_poses.pdbqt").get(1, "") if os.path.exists("docking_poses.pdbqt") else ""
+            orig_ints = compute_spatial_interactions("protein.pdbqt", orig_pose) if orig_pose else []
+            new_ints = compute_spatial_interactions("protein.pdbqt", p4_poses[p4_sel_pose])
+            
+            o_res = ", ".join(sorted(list(set([i["Residue Contact"] for i in orig_ints])))) if orig_ints else "None"
+            n_res = ", ".join(sorted(list(set([i["Residue Contact"] for i in new_ints])))) if new_ints else "None"
+            o_bonds = ", ".join(sorted(list(set([i["Interaction Type"] for i in orig_ints])))) if orig_ints else "None"
+            n_bonds = ", ".join(sorted(list(set([i["Interaction Type"] for i in new_ints])))) if new_ints else "None"
+
+            # Render 3D
+            with open("protein.pdbqt", "r") as f: p_data = f.read()
+            render_advanced_modeling_blueprint(p_data, p4_poses[p4_sel_pose], mode=st.session_state.style_mode, show_surface=st.session_state.surf_toggle, interactions_list=new_ints, unique_id="container_phase4_result")
+
+            st.markdown("#### ⚖️ Direct Thermodynamic Comparison Matrix")
+            comp_data = {
+                "Metric": ["Gibbs Free Energy (ΔG)", "Pocket Residue Contacts", "Identified Interaction Types"],
+                "Original Lead": [f"{orig_aff} kcal/mol" if orig_aff else "N/A", o_res, o_bonds],
+                "Optimized Derivative": [f"{new_aff} kcal/mol", n_res, n_bonds]
+            }
+            df_comp = pd.DataFrame(comp_data)
+            
+            def color_comparison(val):
+                try:
+                    if "kcal/mol" in str(val):
+                        v = float(val.split()[0])
+                        orig_v = float(orig_aff) if orig_aff else 0.0
+                        if v < orig_v: return 'color: #10b981; font-weight: bold;' # Improved (More negative)
+                        elif v > orig_v: return 'color: #ef4444; font-weight: bold;' # Worsened
+                except: pass
+                return 'color: black'
+
+            styled_comp = df_comp.style.applymap(color_comparison, subset=['Optimized Derivative'])
+            st.dataframe(styled_comp, hide_index=True, use_container_width=True)
+            
+            # --- MASTER VERDICT GENERATOR ---
+            delta_aff = round(new_aff - float(orig_aff), 2) if orig_aff else 0.0
+            
+            master_verdict = ""
+            if delta_aff < -0.5:
+                master_verdict += f"🟢 **Outstanding Validation:** The derivative significantly enhanced binding affinity by **{delta_aff} kcal/mol** compared to the original lead. "
+            elif delta_aff < 0:
+                master_verdict += f"🟢 **Positive Validation:** The derivative successfully improved binding affinity by **{delta_aff} kcal/mol**. "
+            elif delta_aff == 0:
+                master_verdict += f"🟡 **Neutral Validation:** The derivative maintained the exact binding affinity of the original lead. "
+            else:
+                master_verdict += f"🔴 **Negative Validation:** The bioisosteric addition caused a steric clash, worsening the binding affinity by **+{delta_aff} kcal/mol**. "
+
+            if "Favorable" in shift_msg or "Comparable" in shift_msg:
+                master_verdict += "Coupled with the stable ADME pharmacokinetics profile, this structural modification is a **Strong Candidate for Synthesis**."
+            else:
+                master_verdict += "However, due to the compromised ADME pharmacokinetics profile, this structural modification should be **Rejected and Redesigned**."
+
+            st.markdown("#### 📜 Master Synthesis Verdict")
+            st.info(master_verdict)
+
+            # --- REPORT EXPORT ---
             st.write("---")
             st.subheader("Data Export & Manuscript Support Systems")
             
-            # --- CRITICAL FIX 4: PASSING ALL DATA INTO THE REPORT ---
             meta_data = extract_pdb_metadata(st.session_state.local_target_path, st.session_state.pdb_id_display) if st.session_state.local_target_path else {"id":"Custom","title":"Uploaded Structure File","method":"N/A","res":"N/A"}
-            
-            # Ensure the user's manually typed values get passed to the HTML export:
             meta_data['name'] = st.session_state.protein_name
             meta_data['id'] = st.session_state.pdb_id_display
-
             b_img = generate_clean_2d_image(st.session_state.smiles_cache, include_labels=False, zoom_level=420)
             
             grid_params = {
@@ -1364,11 +1527,24 @@ else:
                 'exh': st.session_state.exhaustiveness
             }
             
-            selected_pose_export = st.session_state.get('selected_pose_export', 1)
-            parsed_poses = split_docking_poses("docking_poses.pdbqt") if os.path.exists("docking_poses.pdbqt") else {}
-            ligand_pose_data = parsed_poses.get(selected_pose_export, "")
-            
-            active_interactions = compute_spatial_interactions("protein.pdbqt", ligand_pose_data) if ligand_pose_data else []
+            # HTML generation for the comparative table
+            df_comparison_html = '<table class="dataframe table"><thead><tr><th>Metric</th><th>Original Lead</th><th>Optimized Derivative</th></tr></thead><tbody>'
+            for _, r in df_comp.iterrows():
+                val = r['Optimized Derivative']
+                style = ''
+                if "kcal/mol" in str(val) and orig_aff:
+                    try:
+                        v = float(val.split()[0])
+                        orig_v = float(orig_aff)
+                        if v < orig_v: style = 'style="color: #10b981; font-weight: bold;"'
+                        elif v > orig_v: style = 'style="color: #ef4444; font-weight: bold;"'
+                    except: pass
+                df_comparison_html += f"<tr><td>{r['Metric']}</td><td>{r['Original Lead']}</td><td {style}>{val}</td></tr>"
+            df_comparison_html += '</tbody></table>'
+
+            df_results = parse_vina_output_with_residues(st.session_state.docking_results_raw)
+            orig_pose = split_docking_poses("docking_poses.pdbqt").get(st.session_state.get('selected_pose_export', 1), "") if os.path.exists("docking_poses.pdbqt") else ""
+            active_interactions = compute_spatial_interactions("protein.pdbqt", orig_pose) if orig_pose else []
             df_int = pd.DataFrame(active_interactions) if active_interactions else pd.DataFrame()
             
             try:
@@ -1380,9 +1556,10 @@ else:
                 meta=meta_data, adme_p=adme_p, adme_v=adme_v, variant_row=v_row, iupac=iupac, shift_msg=shift_msg, 
                 f_img=ftir_b64, v_2d=v_2d, p_2d=b_img, smiles_cache=st.session_state.smiles_cache, 
                 baseline_affinity=st.session_state.baseline_affinity, grid_params=grid_params, 
-                df_results=df_results if 'df_results' in locals() else None, 
-                df_int=df_int, receptor_data=receptor_data, ligand_pose_data=ligand_pose_data, selected_pose=selected_pose_export,
-                style_mode=st.session_state.style_mode, show_surface=st.session_state.surf_toggle
+                df_results=df_results, df_int=df_int, 
+                receptor_data=receptor_data, ligand_pose_data=p4_poses[p4_sel_pose], selected_pose=p4_sel_pose,
+                style_mode=st.session_state.style_mode, show_surface=st.session_state.surf_toggle,
+                master_verdict=master_verdict, df_comparison_html=df_comparison_html
             )
             
             st.download_button(
