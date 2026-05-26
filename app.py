@@ -231,20 +231,17 @@ def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt", is_ligand=Fals
         return True, output_pdbqt
     except Exception as e: return False, str(e)
 
-# --- CRITICAL FIX 1: BULLETPROOF SMILES EMBEDDING ---
 def convert_smiles_to_pdbqt(smiles_string, output_filename="ligand.pdbqt"):
     try:
         mol = Chem.MolFromSmiles(smiles_string)
         if mol is None: return False, "Invalid SMILES."
         mol = Chem.AddHs(mol)
         
-        # Robust 3D Embedding Algorithm
         params = AllChem.ETKDGv3()
         params.useRandomCoords = True
         params.maxIterations = 1000
         res = AllChem.EmbedMolecule(mol, params)
         if res != 0:
-            # Absolute fallback for complex tautomers/rings
             res = AllChem.EmbedMolecule(mol, useRandomCoords=True)
         if res != 0:
             return False, "RDKit failed to generate 3D coordinates for this specific SMILES."
@@ -432,7 +429,7 @@ def run_cleaving_engine(parent_smiles, target_atom_idx, mechanism_mode):
                         frag_name = frag["name"]
                         route = frag["route"]
             except Exception: 
-                success = False # Soft fallback to sandbox if RDKit crashes
+                success = False
 
         test_mol = Chem.MolFromSmiles(derived_smiles)
         mw = round(Descriptors.MolWt(test_mol), 2) if test_mol else 0
@@ -479,8 +476,6 @@ def calculate_advanced_adme(smiles):
         ring_info = mol.GetRingInfo().AtomRings()
         max_ring = max([len(r) for r in ring_info]) if ring_info else 0
         
-        # 3D Embedding disconnected salts immediately segfaults Streamlit. 
-        # Using the standard 0.88 McGowan approximation guarantees 100% stability.
         vol = float(mw) * 0.88 
             
         acidic_pka = "Neutral"
@@ -599,14 +594,14 @@ def render_advanced_modeling_blueprint(receptor_data, ligand_data, mode="cartoon
     components.html(html_content, height=510)
 
 
-# --- CRITICAL FIX 2: FULL APP PAGE INJECTED REPORT WITH 2 VIEWERS AND YELLOW TEXT ---
+# --- CRITICAL FIX 2: FULL APP PAGE INJECTED REPORT WITH 2 VIEWERS, INTERACTION LABELS, AND YELLOW TEXT ---
 def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, shift_msg, f_img, v_2d, p_2d, 
-                                    smiles_cache, baseline_affinity, grid_params, df_results, df_int, 
+                                    smiles_cache, baseline_affinity, grid_params, df_results, 
+                                    orig_ints, new_ints, 
                                     receptor_data, orig_ligand_pose_data, redesign_ligand_pose_data, 
                                     selected_pose_orig, selected_pose_new, style_mode, show_surface,
                                     master_verdict, df_comparison_html):
     
-    # Pre-style the docking results table if there are positive/negative affinities
     if df_results is not None and not df_results.empty:
         res_html = '<table class="dataframe table"><thead><tr>'
         for col in df_results.columns: res_html += f'<th>{col}</th>'
@@ -627,12 +622,35 @@ def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, sh
     else:
         res_html = "<p>No docking data.</p>"
 
-    # Safely escape strings for JS injection
+    df_int = pd.DataFrame(orig_ints)
+    int_html = df_int.to_html(index=False, classes="dataframe table") if not df_int.empty else "<p>No close contacts detected.</p>"
+    
     safe_rec = str(receptor_data).replace('`', '').replace('\\', '\\\\')
     safe_lig_orig = str(orig_ligand_pose_data).replace('`', '').replace('\\', '\\\\')
     safe_lig_redesign = str(redesign_ligand_pose_data).replace('`', '').replace('\\', '\\\\')
 
-    # Construct the correct styling JS string based on user's selected style_mode
+    # Generate interaction Javascript for Viewer 1 (Original)
+    int_lines_js1 = ""
+    for interact in orig_ints:
+        rc = interact["r_coord"]
+        lc = interact["l_coord"]
+        color = "yellow" if "Hydrogen" in interact["Interaction Type"] else "cyan"
+        int_lines_js1 += f"""
+        viewer1.addCylinder({{start:{{x:{rc[0]}, y:{rc[1]}, z:{rc[2]}}}, end:{{x:{lc[0]}, y:{lc[1]}, z:{lc[2]}}}, radius:0.07, color:'{color}', dashed:true}});
+        viewer1.addLabel("{interact['Residue Contact']} ({interact['Distance (Å)']}A)", {{position:{{x:{rc[0]}, y:{rc[1]}, z:{rc[2]}}}, backgroundColor:'white', fontColor:'black', backgroundOpacity:0.8, fontSize:11}});
+        """
+
+    # Generate interaction Javascript for Viewer 2 (Redesign)
+    int_lines_js2 = ""
+    for interact in new_ints:
+        rc = interact["r_coord"]
+        lc = interact["l_coord"]
+        color = "yellow" if "Hydrogen" in interact["Interaction Type"] else "cyan"
+        int_lines_js2 += f"""
+        viewer2.addCylinder({{start:{{x:{rc[0]}, y:{rc[1]}, z:{rc[2]}}}, end:{{x:{lc[0]}, y:{lc[1]}, z:{lc[2]}}}, radius:0.07, color:'{color}', dashed:true}});
+        viewer2.addLabel("{interact['Residue Contact']} ({interact['Distance (Å)']}A)", {{position:{{x:{rc[0]}, y:{rc[1]}, z:{rc[2]}}}, backgroundColor:'white', fontColor:'black', backgroundOpacity:0.8, fontSize:11}});
+        """
+
     if style_mode == 'cartoon':
         style_js = "viewer1.setStyle({model: 0}, {cartoon: {colorscheme: 'chain', style: 'oval', thickness: 0.6}});"
         style_js2 = "viewer2.setStyle({model: 0}, {cartoon: {colorscheme: 'chain', style: 'oval', thickness: 0.6}});"
@@ -729,6 +747,7 @@ def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, sh
                     viewer1.setStyle({{model: 1}}, {{stick: {{colorscheme: 'greenCarbon', radius: 0.28}}}});
                 }}
                 {surface_js}
+                {int_lines_js1}
                 viewer1.zoomTo(); 
                 viewer1.render();
 
@@ -744,6 +763,7 @@ def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, sh
                     viewer2.setStyle({{model: 1}}, {{stick: {{colorscheme: 'greenCarbon', radius: 0.28}}}});
                 }}
                 {surface_js2}
+                {int_lines_js2}
                 viewer2.zoomTo(); 
                 viewer2.render();
             </script>
@@ -1385,6 +1405,53 @@ else:
                 
             st.success(shift_msg)
 
+            # Safeguard the Phase 3 report download in case Phase 4 hasn't been run yet
+            st.write("---")
+            st.subheader("Data Export & Manuscript Support Systems")
+            
+            meta_data = extract_pdb_metadata(st.session_state.local_target_path, st.session_state.pdb_id_display) if st.session_state.local_target_path else {"id":"Custom","title":"Uploaded Structure File","method":"N/A","res":"N/A"}
+            meta_data['name'] = st.session_state.protein_name
+            meta_data['id'] = st.session_state.pdb_id_display
+            b_img = generate_clean_2d_image(st.session_state.smiles_cache, include_labels=False, zoom_level=420)
+            
+            grid_params = {
+                'cx': st.session_state.cx, 'cy': st.session_state.cy, 'cz': st.session_state.cz,
+                'sx': st.session_state.sx, 'sy': st.session_state.sy, 'sz': st.session_state.sz,
+                'exh': st.session_state.exhaustiveness
+            }
+            
+            df_comparison_html = "<p><i>(Complete Phase 4 Validation Docking to generate comparative binding data)</i></p>"
+            master_verdict = "<i>(Pending Phase 4 thermodynamic validation)</i>"
+
+            df_results = parse_vina_output_with_residues(st.session_state.docking_results_raw)
+            orig_pose = split_docking_poses("docking_poses.pdbqt").get(st.session_state.get('selected_pose_export', 1), "") if os.path.exists("docking_poses.pdbqt") else ""
+            orig_ints = compute_spatial_interactions("protein.pdbqt", orig_pose) if orig_pose else []
+            
+            try:
+                with open("protein.pdbqt", "r") as f: receptor_data = f.read()
+            except:
+                receptor_data = ""
+
+            html_report = build_comprehensive_html_report(
+                meta=meta_data, adme_p=adme_p, adme_v=adme_v, variant_row=v_row, iupac=iupac, shift_msg=shift_msg, 
+                f_img=ftir_b64, v_2d=v_2d, p_2d=b_img, smiles_cache=st.session_state.smiles_cache, 
+                baseline_affinity=st.session_state.baseline_affinity, grid_params=grid_params, 
+                df_results=df_results, orig_ints=orig_ints, new_ints=[], 
+                receptor_data=receptor_data, orig_ligand_pose_data=orig_pose, redesign_ligand_pose_data="", 
+                selected_pose_orig=st.session_state.get('selected_pose_export', 1), selected_pose_new="N/A",
+                style_mode=st.session_state.style_mode, show_surface=st.session_state.surf_toggle,
+                master_verdict=master_verdict, df_comparison_html=df_comparison_html
+            )
+            
+            st.download_button(
+                label="📥 Download Consolidated Manuscript Quality HTML Research Report",
+                data=html_report,
+                file_name=f"InSilico_BioSphere_Research_Record_{v_row['Variant ID']}.html",
+                mime="text/html",
+                use_container_width=True,
+                key="dl_phase3"
+            )
+
 # ---------------------------------------------------------------------
 # PHASE 4: POST-REDESIGN VALIDATION DOCKING & MASTER SYNTHESIS
 # ---------------------------------------------------------------------
@@ -1583,7 +1650,6 @@ else:
             df_comparison_html += '</tbody></table>'
 
             df_results = parse_vina_output_with_residues(st.session_state.docking_results_raw)
-            df_int_orig = pd.DataFrame(orig_ints) if orig_ints else pd.DataFrame()
             
             try:
                 with open("protein.pdbqt", "r") as f: receptor_data = f.read()
@@ -1594,7 +1660,7 @@ else:
                 meta=meta_data, adme_p=adme_p, adme_v=adme_v, variant_row=v_row, iupac=iupac, shift_msg=shift_msg, 
                 f_img=ftir_b64, v_2d=v_2d, p_2d=b_img, smiles_cache=st.session_state.smiles_cache, 
                 baseline_affinity=st.session_state.baseline_affinity, grid_params=grid_params, 
-                df_results=df_results, df_int=df_int_orig, 
+                df_results=df_results, orig_ints=orig_ints, new_ints=new_ints, 
                 receptor_data=receptor_data, orig_ligand_pose_data=orig_pose, redesign_ligand_pose_data=p4_poses[p4_sel_pose], 
                 selected_pose_orig=st.session_state.get('selected_pose_export', 1), selected_pose_new=p4_sel_pose,
                 style_mode=st.session_state.style_mode, show_surface=st.session_state.surf_toggle,
@@ -1606,7 +1672,8 @@ else:
                 data=html_report,
                 file_name=f"InSilico_BioSphere_Research_Record_{v_row['Variant ID']}.html",
                 mime="text/html",
-                use_container_width=True
+                use_container_width=True,
+                key="dl_phase4"
             )
 
 # Execute Rerun at the absolute bottom of the script to prevent rendering glitches
