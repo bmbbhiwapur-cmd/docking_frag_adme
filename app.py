@@ -627,8 +627,6 @@ def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, sh
     else:
         res_html = "<p>No docking data.</p>"
 
-    int_html = df_int.to_html(index=False, classes="dataframe table") if df_int is not None and not df_int.empty else "<p>No close contacts detected.</p>"
-    
     # Safely escape strings for JS injection
     safe_rec = str(receptor_data).replace('`', '').replace('\\', '\\\\')
     safe_lig_orig = str(orig_ligand_pose_data).replace('`', '').replace('\\', '\\\\')
@@ -636,16 +634,16 @@ def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, sh
 
     # Construct the correct styling JS string based on user's selected style_mode
     if style_mode == 'cartoon':
-        style_js = "viewer.setStyle({model: 0}, {cartoon: {colorscheme: 'chain', style: 'oval', thickness: 0.6}});"
+        style_js = "viewer1.setStyle({model: 0}, {cartoon: {colorscheme: 'chain', style: 'oval', thickness: 0.6}});"
         style_js2 = "viewer2.setStyle({model: 0}, {cartoon: {colorscheme: 'chain', style: 'oval', thickness: 0.6}});"
     elif style_mode == 'spacefill':
-        style_js = "viewer.setStyle({model: 0}, {sphere: {colorscheme: 'chain', radius:1.1}});"
+        style_js = "viewer1.setStyle({model: 0}, {sphere: {colorscheme: 'chain', radius:1.1}});"
         style_js2 = "viewer2.setStyle({model: 0}, {sphere: {colorscheme: 'chain', radius:1.1}});"
     else:
-        style_js = "viewer.setStyle({model: 0}, {stick: {colorscheme: 'chain', radius:0.25}});"
+        style_js = "viewer1.setStyle({model: 0}, {stick: {colorscheme: 'chain', radius:0.25}});"
         style_js2 = "viewer2.setStyle({model: 0}, {stick: {colorscheme: 'chain', radius:0.25}});"
         
-    surface_js = "viewer.addSurface($3Dmol.SurfaceType.VDW, {opacity:0.45, colorscheme:{prop:'b',gradient:'rwb'}}, {model:0});" if show_surface else ""
+    surface_js = "viewer1.addSurface($3Dmol.SurfaceType.VDW, {opacity:0.45, colorscheme:{prop:'b',gradient:'rwb'}}, {model:0});" if show_surface else ""
     surface_js2 = "viewer2.addSurface($3Dmol.SurfaceType.VDW, {opacity:0.45, colorscheme:{prop:'b',gradient:'rwb'}}, {model:0});" if show_surface else ""
     
     return f"""
@@ -702,30 +700,57 @@ def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, sh
                 {res_html}
             </div>
 
-            <h2>3. Original Lead Active Complex Visualization (Pose {selected_pose_orig})</h2>
-            <p>Interactive 3D representation of the ORIGINAL receptor-ligand complex binding site.</p>
-            <div id="container-3d-orig" style="height: 480px; width: 100%; position: relative; border-radius:8px; border:1px solid #eaeaea; background:#ffffff; box-shadow: 0 4px 10px rgba(0,0,0,0.05);"></div>
+            <h2>3. Validation Complex Analysis (Side-by-Side Comparison)</h2>
+            <p>Interactive 3D representation comparing the original lead and the redesigned derivative inside the target receptor pocket.</p>
+            
+            <div style="display: flex; gap: 20px; margin-bottom: 20px; flex-wrap: wrap;">
+                <div style="flex: 1; min-width: 300px;">
+                    <h4 style="color:#1e3c72; text-align:center;">Original Lead (Pose {selected_pose_orig})</h4>
+                    <div id="container-3d-orig" style="height: 400px; width: 100%; position: relative; border-radius:8px; border:1px solid #eaeaea; background:#ffffff; box-shadow: 0 4px 10px rgba(0,0,0,0.05);"></div>
+                </div>
+                <div style="flex: 1; min-width: 300px;">
+                    <h4 style="color:#1e3c72; text-align:center;">Optimized Derivative (Pose {selected_pose_new})</h4>
+                    <div id="container-3d-redesign" style="height: 400px; width: 100%; position: relative; border-radius:8px; border:1px solid #eaeaea; background:#ffffff; box-shadow: 0 4px 10px rgba(0,0,0,0.05);"></div>
+                </div>
+            </div>
+            
             <script src="https://cdnjs.cloudflare.com/ajax/libs/3Dmol/2.0.4/3Dmol-min.js"></script>
             <script>
-                let viewer = $3Dmol.createViewer(document.getElementById('container-3d-orig'), {{backgroundColor: '#ffffff'}});
+                // Viewer 1 (Original)
+                let viewer1 = $3Dmol.createViewer(document.getElementById('container-3d-orig'), {{backgroundColor: '#ffffff'}});
                 let rec_data = `{safe_rec}`;
-                let lig_data = `{safe_lig_orig}`;
+                let lig_data_orig = `{safe_lig_orig}`;
                 if (rec_data.trim().length > 0) {{
-                    viewer.addModel(rec_data, 'pdb');
+                    viewer1.addModel(rec_data, 'pdb');
                     {style_js}
                 }}
-                if (lig_data.trim().length > 0) {{
-                    viewer.addModel(lig_data, 'pdb');
-                    viewer.setStyle({{model: 1}}, {{stick: {{colorscheme: 'greenCarbon', radius: 0.28}}}});
+                if (lig_data_orig.trim().length > 0) {{
+                    viewer1.addModel(lig_data_orig, 'pdb');
+                    viewer1.setStyle({{model: 1}}, {{stick: {{colorscheme: 'greenCarbon', radius: 0.28}}}});
                 }}
                 {surface_js}
-                viewer.zoomTo(); 
-                viewer.render();
+                viewer1.zoomTo(); 
+                viewer1.render();
+
+                // Viewer 2 (Redesign)
+                let viewer2 = $3Dmol.createViewer(document.getElementById('container-3d-redesign'), {{backgroundColor: '#ffffff'}});
+                let lig_data_redesign = `{safe_lig_redesign}`;
+                if (rec_data.trim().length > 0) {{
+                    viewer2.addModel(rec_data, 'pdb');
+                    {style_js2}
+                }}
+                if (lig_data_redesign.trim().length > 0) {{
+                    viewer2.addModel(lig_data_redesign, 'pdb');
+                    viewer2.setStyle({{model: 1}}, {{stick: {{colorscheme: 'greenCarbon', radius: 0.28}}}});
+                }}
+                {surface_js2}
+                viewer2.zoomTo(); 
+                viewer2.render();
             </script>
 
-            <h3>Original Local Contact Residues & Bond Matrix</h3>
+            <p style="margin-top:20px;">Direct Thermodynamic Comparison Matrix</p>
             <div class="table-wrapper">
-                {int_html}
+                {df_comparison_html}
             </div>
 
             <h2>4. Generative Scaffold Optimization</h2>
@@ -782,31 +807,7 @@ def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, sh
                 <img src="data:image/png;base64,{f_img}" style="max-width:100%; border-radius:6px; border: 1px solid #e2e8f0;"/>
             </div>
             
-            <h2>6. Post-Redesign Validation Docking & Master Synthesis Verdict</h2>
-            <p>Interactive 3D representation of the REDESIGNED derivative in the receptor pocket (Pose {selected_pose_new}).</p>
-            <div id="container-3d-redesign" style="height: 480px; width: 100%; position: relative; border-radius:8px; border:1px solid #eaeaea; background:#ffffff; box-shadow: 0 4px 10px rgba(0,0,0,0.05);"></div>
-            <script>
-                let viewer2 = $3Dmol.createViewer(document.getElementById('container-3d-redesign'), {{backgroundColor: '#ffffff'}});
-                let lig_data2 = `{safe_lig_redesign}`;
-                if (rec_data.trim().length > 0) {{
-                    viewer2.addModel(rec_data, 'pdb');
-                    {style_js2}
-                }}
-                if (lig_data2.trim().length > 0) {{
-                    viewer2.addModel(lig_data2, 'pdb');
-                    viewer2.setStyle({{model: 1}}, {{stick: {{colorscheme: 'greenCarbon', radius: 0.28}}}});
-                }}
-                {surface_js2}
-                viewer2.zoomTo(); 
-                viewer2.render();
-            </script>
-
-            <p style="margin-top:20px;">Comparing Original Lead vs. Optimized Derivative inside the Target Receptor Pocket.</p>
-            <div class="table-wrapper">
-                {df_comparison_html}
-            </div>
-            
-            <h3>Master Executive Summary</h3>
+            <h2>6. Master Synthesis Verdict</h2>
             <div class="verdict-card">
                 {master_verdict}
             </div>
@@ -815,7 +816,7 @@ def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, sh
         <footer>
             <p>Report compiled successfully. Ready for manuscript citation.</p>
             <p>InSilico BioSphere: An Integrated Platform for Automated Molecular Docking.</p>
-            <p>Developed by Mr. Sarang S. Dhote, Assistant Professor, Department of Chemistry,<br>
+            <p>Developed by Dr. Sarang S. Dhote, Assistant Professor, Department of Chemistry,<br>
             Shivaji Science College, Nagpur, India.<br>
             Email: contact - sarangresearch@gmail.com</p>
         </footer>
