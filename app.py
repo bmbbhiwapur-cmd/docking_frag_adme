@@ -599,10 +599,11 @@ def render_advanced_modeling_blueprint(receptor_data, ligand_data, mode="cartoon
     components.html(html_content, height=510)
 
 
-# --- CRITICAL FIX 2: FULL APP PAGE INJECTED REPORT WITH STYLES ---
+# --- CRITICAL FIX 2: FULL APP PAGE INJECTED REPORT WITH 2 VIEWERS AND YELLOW TEXT ---
 def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, shift_msg, f_img, v_2d, p_2d, 
                                     smiles_cache, baseline_affinity, grid_params, df_results, df_int, 
-                                    receptor_data, ligand_pose_data, selected_pose, style_mode, show_surface,
+                                    receptor_data, orig_ligand_pose_data, redesign_ligand_pose_data, 
+                                    selected_pose_orig, selected_pose_new, style_mode, show_surface,
                                     master_verdict, df_comparison_html):
     
     # Pre-style the docking results table if there are positive/negative affinities
@@ -630,17 +631,22 @@ def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, sh
     
     # Safely escape strings for JS injection
     safe_rec = str(receptor_data).replace('`', '').replace('\\', '\\\\')
-    safe_lig = str(ligand_pose_data).replace('`', '').replace('\\', '\\\\')
+    safe_lig_orig = str(orig_ligand_pose_data).replace('`', '').replace('\\', '\\\\')
+    safe_lig_redesign = str(redesign_ligand_pose_data).replace('`', '').replace('\\', '\\\\')
 
     # Construct the correct styling JS string based on user's selected style_mode
     if style_mode == 'cartoon':
         style_js = "viewer.setStyle({model: 0}, {cartoon: {colorscheme: 'chain', style: 'oval', thickness: 0.6}});"
+        style_js2 = "viewer2.setStyle({model: 0}, {cartoon: {colorscheme: 'chain', style: 'oval', thickness: 0.6}});"
     elif style_mode == 'spacefill':
         style_js = "viewer.setStyle({model: 0}, {sphere: {colorscheme: 'chain', radius:1.1}});"
+        style_js2 = "viewer2.setStyle({model: 0}, {sphere: {colorscheme: 'chain', radius:1.1}});"
     else:
         style_js = "viewer.setStyle({model: 0}, {stick: {colorscheme: 'chain', radius:0.25}});"
+        style_js2 = "viewer2.setStyle({model: 0}, {stick: {colorscheme: 'chain', radius:0.25}});"
         
     surface_js = "viewer.addSurface($3Dmol.SurfaceType.VDW, {opacity:0.45, colorscheme:{prop:'b',gradient:'rwb'}}, {model:0});" if show_surface else ""
+    surface_js2 = "viewer2.addSurface($3Dmol.SurfaceType.VDW, {opacity:0.45, colorscheme:{prop:'b',gradient:'rwb'}}, {model:0});" if show_surface else ""
     
     return f"""
     <!DOCTYPE html>
@@ -696,14 +702,14 @@ def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, sh
                 {res_html}
             </div>
 
-            <h2>3. Active Complex Visualization (Pose {selected_pose})</h2>
-            <p>Interactive 3D representation of the receptor-ligand complex binding site.</p>
-            <div id="container-3d" style="height: 480px; width: 100%; position: relative; border-radius:8px; border:1px solid #eaeaea; background:#ffffff; box-shadow: 0 4px 10px rgba(0,0,0,0.05);"></div>
+            <h2>3. Original Lead Active Complex Visualization (Pose {selected_pose_orig})</h2>
+            <p>Interactive 3D representation of the ORIGINAL receptor-ligand complex binding site.</p>
+            <div id="container-3d-orig" style="height: 480px; width: 100%; position: relative; border-radius:8px; border:1px solid #eaeaea; background:#ffffff; box-shadow: 0 4px 10px rgba(0,0,0,0.05);"></div>
             <script src="https://cdnjs.cloudflare.com/ajax/libs/3Dmol/2.0.4/3Dmol-min.js"></script>
             <script>
-                let viewer = $3Dmol.createViewer(document.getElementById('container-3d'), {{backgroundColor: '#ffffff'}});
+                let viewer = $3Dmol.createViewer(document.getElementById('container-3d-orig'), {{backgroundColor: '#ffffff'}});
                 let rec_data = `{safe_rec}`;
-                let lig_data = `{safe_lig}`;
+                let lig_data = `{safe_lig_orig}`;
                 if (rec_data.trim().length > 0) {{
                     viewer.addModel(rec_data, 'pdb');
                     {style_js}
@@ -717,7 +723,7 @@ def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, sh
                 viewer.render();
             </script>
 
-            <h3>Local Contact Residues & Bond Matrix</h3>
+            <h3>Original Local Contact Residues & Bond Matrix</h3>
             <div class="table-wrapper">
                 {int_html}
             </div>
@@ -777,7 +783,25 @@ def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, sh
             </div>
             
             <h2>6. Post-Redesign Validation Docking & Master Synthesis Verdict</h2>
-            <p>Comparing Original Lead vs. Optimized Derivative inside the Target Receptor Pocket.</p>
+            <p>Interactive 3D representation of the REDESIGNED derivative in the receptor pocket (Pose {selected_pose_new}).</p>
+            <div id="container-3d-redesign" style="height: 480px; width: 100%; position: relative; border-radius:8px; border:1px solid #eaeaea; background:#ffffff; box-shadow: 0 4px 10px rgba(0,0,0,0.05);"></div>
+            <script>
+                let viewer2 = $3Dmol.createViewer(document.getElementById('container-3d-redesign'), {{backgroundColor: '#ffffff'}});
+                let lig_data2 = `{safe_lig_redesign}`;
+                if (rec_data.trim().length > 0) {{
+                    viewer2.addModel(rec_data, 'pdb');
+                    {style_js2}
+                }}
+                if (lig_data2.trim().length > 0) {{
+                    viewer2.addModel(lig_data2, 'pdb');
+                    viewer2.setStyle({{model: 1}}, {{stick: {{colorscheme: 'greenCarbon', radius: 0.28}}}});
+                }}
+                {surface_js2}
+                viewer2.zoomTo(); 
+                viewer2.render();
+            </script>
+
+            <p style="margin-top:20px;">Comparing Original Lead vs. Optimized Derivative inside the Target Receptor Pocket.</p>
             <div class="table-wrapper">
                 {df_comparison_html}
             </div>
@@ -1442,10 +1466,10 @@ else:
     # Results Display
     if st.session_state.redesign_docking_results_raw is not None and os.path.exists("redesign_docking_poses.pdbqt"):
         st.write("---")
-        st.subheader("3. Validation Complex Analysis")
+        st.subheader("3. Validation Complex Analysis (Side-by-Side Comparison)")
         p4_poses = split_docking_poses("redesign_docking_poses.pdbqt")
         if p4_poses:
-            p4_sel_pose = st.selectbox("Select Derivative Binding Pose:", options=list(p4_poses.keys()), format_func=lambda x: f"Derivative Pose {x}", key="p4_pose_sel")
+            p4_sel_pose = st.selectbox("Select Derivative Binding Pose for Comparison:", options=list(p4_poses.keys()), format_func=lambda x: f"Derivative Pose {x}", key="p4_pose_sel")
             
             # Extract Affinities
             orig_aff = st.session_state.baseline_affinity
@@ -1457,7 +1481,7 @@ else:
             except: new_aff = 0.0
 
             # Compare Data
-            orig_pose = split_docking_poses("docking_poses.pdbqt").get(1, "") if os.path.exists("docking_poses.pdbqt") else ""
+            orig_pose = split_docking_poses("docking_poses.pdbqt").get(st.session_state.get('selected_pose_export', 1), "") if os.path.exists("docking_poses.pdbqt") else ""
             orig_ints = compute_spatial_interactions("protein.pdbqt", orig_pose) if orig_pose else []
             new_ints = compute_spatial_interactions("protein.pdbqt", p4_poses[p4_sel_pose])
             
@@ -1466,9 +1490,16 @@ else:
             o_bonds = ", ".join(sorted(list(set([i["Interaction Type"] for i in orig_ints])))) if orig_ints else "None"
             n_bonds = ", ".join(sorted(list(set([i["Interaction Type"] for i in new_ints])))) if new_ints else "None"
 
-            # Render 3D
+            # Render 3D Side-by-Side
             with open("protein.pdbqt", "r") as f: p_data = f.read()
-            render_advanced_modeling_blueprint(p_data, p4_poses[p4_sel_pose], mode=st.session_state.style_mode, show_surface=st.session_state.surf_toggle, interactions_list=new_ints, unique_id="container_phase4_result")
+            
+            col_3d_1, col_3d_2 = st.columns(2)
+            with col_3d_1:
+                st.markdown("#### Original Lead Complex")
+                render_advanced_modeling_blueprint(p_data, orig_pose, mode=st.session_state.style_mode, show_surface=st.session_state.surf_toggle, interactions_list=orig_ints, unique_id="p4_orig_viewer")
+            with col_3d_2:
+                st.markdown(f"#### Redesigned Derivative (Pose {p4_sel_pose})")
+                render_advanced_modeling_blueprint(p_data, p4_poses[p4_sel_pose], mode=st.session_state.style_mode, show_surface=st.session_state.surf_toggle, interactions_list=new_ints, unique_id="p4_new_viewer")
 
             st.markdown("#### ⚖️ Direct Thermodynamic Comparison Matrix")
             comp_data = {
@@ -1485,10 +1516,16 @@ else:
                         orig_v = float(orig_aff) if orig_aff else 0.0
                         if v < orig_v: return 'color: #10b981; font-weight: bold;' # Improved (More negative)
                         elif v > orig_v: return 'color: #ef4444; font-weight: bold;' # Worsened
+                    else:
+                        # For residue text strings, use a nice golden yellow for visibility
+                        return 'color: #d97706; font-weight: bold;'
                 except: pass
                 return 'color: black'
 
-            styled_comp = df_comp.style.applymap(color_comparison, subset=['Optimized Derivative'])
+            try:
+                styled_comp = df_comp.style.map(color_comparison, subset=['Optimized Derivative'])
+            except AttributeError:
+                styled_comp = df_comp.style.applymap(color_comparison, subset=['Optimized Derivative'])
             st.dataframe(styled_comp, hide_index=True, use_container_width=True)
             
             # --- MASTER VERDICT GENERATOR ---
@@ -1527,7 +1564,7 @@ else:
                 'exh': st.session_state.exhaustiveness
             }
             
-            # HTML generation for the comparative table
+            # HTML generation for the comparative table (with CSS yellow text color)
             df_comparison_html = '<table class="dataframe table"><thead><tr><th>Metric</th><th>Original Lead</th><th>Optimized Derivative</th></tr></thead><tbody>'
             for _, r in df_comp.iterrows():
                 val = r['Optimized Derivative']
@@ -1539,13 +1576,13 @@ else:
                         if v < orig_v: style = 'style="color: #10b981; font-weight: bold;"'
                         elif v > orig_v: style = 'style="color: #ef4444; font-weight: bold;"'
                     except: pass
+                else:
+                    style = 'style="color: #d97706; font-weight: bold;"' # Golden Yellow CSS for non-numeric text
                 df_comparison_html += f"<tr><td>{r['Metric']}</td><td>{r['Original Lead']}</td><td {style}>{val}</td></tr>"
             df_comparison_html += '</tbody></table>'
 
             df_results = parse_vina_output_with_residues(st.session_state.docking_results_raw)
-            orig_pose = split_docking_poses("docking_poses.pdbqt").get(st.session_state.get('selected_pose_export', 1), "") if os.path.exists("docking_poses.pdbqt") else ""
-            active_interactions = compute_spatial_interactions("protein.pdbqt", orig_pose) if orig_pose else []
-            df_int = pd.DataFrame(active_interactions) if active_interactions else pd.DataFrame()
+            df_int_orig = pd.DataFrame(orig_ints) if orig_ints else pd.DataFrame()
             
             try:
                 with open("protein.pdbqt", "r") as f: receptor_data = f.read()
@@ -1556,8 +1593,9 @@ else:
                 meta=meta_data, adme_p=adme_p, adme_v=adme_v, variant_row=v_row, iupac=iupac, shift_msg=shift_msg, 
                 f_img=ftir_b64, v_2d=v_2d, p_2d=b_img, smiles_cache=st.session_state.smiles_cache, 
                 baseline_affinity=st.session_state.baseline_affinity, grid_params=grid_params, 
-                df_results=df_results, df_int=df_int, 
-                receptor_data=receptor_data, ligand_pose_data=p4_poses[p4_sel_pose], selected_pose=p4_sel_pose,
+                df_results=df_results, df_int=df_int_orig, 
+                receptor_data=receptor_data, orig_ligand_pose_data=orig_pose, redesign_ligand_pose_data=p4_poses[p4_sel_pose], 
+                selected_pose_orig=st.session_state.get('selected_pose_export', 1), selected_pose_new=p4_sel_pose,
                 style_mode=st.session_state.style_mode, show_surface=st.session_state.surf_toggle,
                 master_verdict=master_verdict, df_comparison_html=df_comparison_html
             )
