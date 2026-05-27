@@ -594,7 +594,6 @@ def render_advanced_modeling_blueprint(receptor_data, ligand_data, mode="cartoon
     components.html(html_content, height=510)
 
 
-# --- CRITICAL FIX 2: FULL APP PAGE INJECTED REPORT WITH 2 VIEWERS, INTERACTION LABELS, AND YELLOW TEXT ---
 def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, shift_msg, f_img, v_2d, p_2d, 
                                     smiles_cache, baseline_affinity, grid_params, df_results, 
                                     orig_ints, new_ints, 
@@ -629,7 +628,6 @@ def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, sh
     safe_lig_orig = str(orig_ligand_pose_data).replace('`', '').replace('\\', '\\\\')
     safe_lig_redesign = str(redesign_ligand_pose_data).replace('`', '').replace('\\', '\\\\')
 
-    # Generate interaction Javascript for Viewer 1 (Original)
     int_lines_js1 = ""
     for interact in orig_ints:
         rc = interact["r_coord"]
@@ -640,7 +638,6 @@ def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, sh
         viewer1.addLabel("{interact['Residue Contact']} ({interact['Distance (Å)']}A)", {{position:{{x:{rc[0]}, y:{rc[1]}, z:{rc[2]}}}, backgroundColor:'white', fontColor:'black', backgroundOpacity:0.8, fontSize:11}});
         """
 
-    # Generate interaction Javascript for Viewer 2 (Redesign)
     int_lines_js2 = ""
     for interact in new_ints:
         rc = interact["r_coord"]
@@ -1405,53 +1402,6 @@ else:
                 
             st.success(shift_msg)
 
-            # Safeguard the Phase 3 report download in case Phase 4 hasn't been run yet
-            st.write("---")
-            st.subheader("Data Export & Manuscript Support Systems")
-            
-            meta_data = extract_pdb_metadata(st.session_state.local_target_path, st.session_state.pdb_id_display) if st.session_state.local_target_path else {"id":"Custom","title":"Uploaded Structure File","method":"N/A","res":"N/A"}
-            meta_data['name'] = st.session_state.protein_name
-            meta_data['id'] = st.session_state.pdb_id_display
-            b_img = generate_clean_2d_image(st.session_state.smiles_cache, include_labels=False, zoom_level=420)
-            
-            grid_params = {
-                'cx': st.session_state.cx, 'cy': st.session_state.cy, 'cz': st.session_state.cz,
-                'sx': st.session_state.sx, 'sy': st.session_state.sy, 'sz': st.session_state.sz,
-                'exh': st.session_state.exhaustiveness
-            }
-            
-            df_comparison_html = "<p><i>(Complete Phase 4 Validation Docking to generate comparative binding data)</i></p>"
-            master_verdict = "<i>(Pending Phase 4 thermodynamic validation)</i>"
-
-            df_results = parse_vina_output_with_residues(st.session_state.docking_results_raw)
-            orig_pose = split_docking_poses("docking_poses.pdbqt").get(st.session_state.get('selected_pose_export', 1), "") if os.path.exists("docking_poses.pdbqt") else ""
-            orig_ints = compute_spatial_interactions("protein.pdbqt", orig_pose) if orig_pose else []
-            
-            try:
-                with open("protein.pdbqt", "r") as f: receptor_data = f.read()
-            except:
-                receptor_data = ""
-
-            html_report = build_comprehensive_html_report(
-                meta=meta_data, adme_p=adme_p, adme_v=adme_v, variant_row=v_row, iupac=iupac, shift_msg=shift_msg, 
-                f_img=ftir_b64, v_2d=v_2d, p_2d=b_img, smiles_cache=st.session_state.smiles_cache, 
-                baseline_affinity=st.session_state.baseline_affinity, grid_params=grid_params, 
-                df_results=df_results, orig_ints=orig_ints, new_ints=[], 
-                receptor_data=receptor_data, orig_ligand_pose_data=orig_pose, redesign_ligand_pose_data="", 
-                selected_pose_orig=st.session_state.get('selected_pose_export', 1), selected_pose_new="N/A",
-                style_mode=st.session_state.style_mode, show_surface=st.session_state.surf_toggle,
-                master_verdict=master_verdict, df_comparison_html=df_comparison_html
-            )
-            
-            st.download_button(
-                label="📥 Download Consolidated Manuscript Quality HTML Research Report",
-                data=html_report,
-                file_name=f"InSilico_BioSphere_Research_Record_{v_row['Variant ID']}.html",
-                mime="text/html",
-                use_container_width=True,
-                key="dl_phase3"
-            )
-
 # ---------------------------------------------------------------------
 # PHASE 4: POST-REDESIGN VALIDATION DOCKING & MASTER SYNTHESIS
 # ---------------------------------------------------------------------
@@ -1490,7 +1440,7 @@ else:
             if "Blind" in grid_mode:
                 p4_cx, p4_cy, p4_cz, p4_sx, p4_sy, p4_sz = compute_protein_bounding_box("protein.pdbqt")
             else:
-                p4_cx, p4_cy, p4_cz = st.session_state.cx, st.session_state.cy, st.session_state.cz
+                p4_cx, p4_cy, p4_cz = st.session_state.cx, st.session_state.cy, st.session_state.cx
                 p4_sx, p4_sy, p4_sz = st.session_state.sx, st.session_state.sy, st.session_state.sz
                 
             vina_path = os.path.abspath("vina")
@@ -1650,6 +1600,7 @@ else:
             df_comparison_html += '</tbody></table>'
 
             df_results = parse_vina_output_with_residues(st.session_state.docking_results_raw)
+            df_int_orig = pd.DataFrame(orig_ints) if orig_ints else pd.DataFrame()
             
             try:
                 with open("protein.pdbqt", "r") as f: receptor_data = f.read()
