@@ -55,6 +55,9 @@ def initialize_session_states():
         "ligand_summary_text": "",
         "smiles_cache": "",
         "baseline_affinity": None,
+        "baseline_pre_uff": "N/A",
+        "baseline_post_uff": "N/A",
+        "baseline_delta_uff": "N/A",
         "redesign_baseline_affinity": None,
         "rd_library": None,
         "selected_variant_id": None,
@@ -429,6 +432,15 @@ def parse_vina_output_with_residues_global(stdout_text, docking_file="docking_po
             except ValueError: continue
     return pd.DataFrame(data)
 
+def format_interaction_matrix_text(interactions_list):
+    if not interactions_list: return "- No close contacts detected under 3.8 Angstroms."
+    df = pd.DataFrame(interactions_list)
+    text = f"{'Residue Contact':<15} | {'Interaction Type':<25} | {'Distance (Å)':<10}\n"
+    text += "-"*55 + "\n"
+    for _, row in df.iterrows():
+        text += f"{row['Residue Contact']:<15} | {row['Interaction Type']:<25} | {row['Distance (Å)']:<10}\n"
+    return text
+
 # =====================================================================
 # 3. FRAGMENTATION & ADVANCED ADME MODULE
 # =====================================================================
@@ -563,7 +575,7 @@ def calculate_advanced_adme(smiles):
     except Exception: return default_adme
 
 # =====================================================================
-# 4. HIGH PERFORMANCE VISUALIZATION UTILITIES
+# 4. HIGH PERFORMANCE VISUALIZATION UTILITIES & HTML REPORTING
 # =====================================================================
 
 def generate_clean_2d_image(smiles_str, include_labels=False, zoom_level=450):
@@ -639,11 +651,123 @@ def render_advanced_modeling_blueprint(receptor_data, ligand_data, mode="cartoon
     components.html(html_content, height=510)
 
 
+def build_phase1_html_report(meta, p_2d, smiles_cache, grid_params, df_results, orig_ints, receptor_data, orig_ligand_pose_data, selected_pose_orig, style_mode, show_surface, pre_uff, post_uff, delta_uff, active_retained_ions, uff_theory_html, orig_matrix_html):
+    res_html = "<p>No docking data.</p>"
+    if df_results is not None and not df_results.empty:
+        res_html = '<table class="dataframe table"><thead><tr>'
+        for col in df_results.columns: res_html += f'<th>{col}</th>'
+        res_html += '</tr></thead><tbody>'
+        for _, row in df_results.iterrows():
+            res_html += '<tr>'
+            for col in df_results.columns:
+                val = row[col]
+                style = ''
+                if col == 'Affinity (kcal/mol)' and isinstance(val, (int, float)):
+                    if val < 0: style = 'style="color: #10b981; font-weight: bold;"'
+                    elif val > 0: style = 'style="color: #ef4444; font-weight: bold;"'
+                res_html += f'<td {style}>{val}</td>'
+            res_html += '</tr>'
+        res_html += '</tbody></table>'
+
+    safe_rec = str(receptor_data).replace('`', '').replace('\\', '\\\\')
+    safe_lig_orig = str(orig_ligand_pose_data).replace('`', '').replace('\\', '\\\\')
+
+    int_lines_js1 = ""
+    for interact in orig_ints:
+        color = "yellow" if "Hydrogen" in interact["Interaction Type"] else "cyan"
+        int_lines_js1 += f"viewer1.addCylinder({{start:{{x:{interact['r_coord'][0]}, y:{interact['r_coord'][1]}, z:{interact['r_coord'][2]}}}, end:{{x:{interact['l_coord'][0]}, y:{interact['l_coord'][1]}, z:{interact['l_coord'][2]}}}, radius:0.07, color:'{color}', dashed:true}});\n"
+
+    if style_mode == 'cartoon': style_js = "viewer1.setStyle({model: 0}, {cartoon: {colorscheme: 'chain', style: 'oval', thickness: 0.6}});"
+    elif style_mode == 'spacefill': style_js = "viewer1.setStyle({model: 0}, {sphere: {colorscheme: 'chain', radius:1.1}});"
+    else: style_js = "viewer1.setStyle({model: 0}, {stick: {colorscheme: 'chain', radius:0.25}});"
+        
+    surface_js = "viewer1.addSurface($3Dmol.SurfaceType.VDW, {opacity:0.45, colorscheme:{prop:'b',gradient:'rwb'}}, {model:0});" if show_surface else ""
+    
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <title>InSilico BioSphere - Phase 1 Docking Report</title>
+        <style>
+            body {{ font-family: 'Segoe UI', Arial, sans-serif; color: #333; line-height: 1.6; margin: 0; padding: 0; background-color: #f9f9fb; }}
+            .header-banner {{ background: linear-gradient(135deg, #1e3c72, #2a5298); color: white; padding: 25px; border-bottom: 5px solid #00c6ff; text-align: center; position: relative; }}
+            .header-banner h1 {{ margin: 0; font-size: 28px; letter-spacing: 1px; }}
+            .header-banner p {{ margin: 5px 0 0 0; font-size: 14px; opacity: 0.9; }}
+            .container {{ max-width: 1000px; margin: 30px auto; background: white; padding: 40px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); }}
+            h2 {{ color: #1e3c72; border-bottom: 2px solid #eef2f7; padding-bottom: 8px; margin-top: 35px; font-size: 20px; }}
+            .meta-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; background: #f4f7f6; padding: 20px; border-radius: 8px; }}
+            .meta-item {{ font-size: 14px; }}
+            .meta-item strong {{ color: #1e3c72; }}
+            .table-wrapper {{ overflow-x: auto; margin: 20px 0; border: 1px solid #e2e8f0; border-radius: 6px; box-shadow: 0 2px 5px rgba(0,0,0,0.02); }}
+            table {{ width: 100%; border-collapse: collapse; font-size: 13px; min-width: 600px; }}
+            th, td {{ border: 1px solid #e2e8f0; padding: 10px; text-align: left; }}
+            th {{ background-color: #f8fafc; color: #1e3c72; font-weight: 600; }}
+            .structure-img {{ background: white; padding: 10px; border: 1px solid #e2e8f0; border-radius: 6px; max-width: 320px; text-align: center; margin: 0 auto; }}
+        </style>
+    </head>
+    <body>
+        <div class="header-banner">
+            <h1>🔬 InSilico BioSphere Phase 1 Docking Report</h1>
+            <p>Department of Chemistry, Shivaji Science College, Nagpur, India</p>
+        </div>
+        
+        <div class="container">
+            <h2>1. Target Receptor & Ligand Profile</h2>
+            <div class="meta-grid">
+                <div class="meta-item"><strong>Target Protein:</strong> {meta['name']}</div>
+                <div class="meta-item"><strong>PDB ID:</strong> {meta['id']}</div>
+                <div class="meta-item"><strong>Catalytic Cofactors Filter:</strong> {active_retained_ions}</div>
+                <div class="meta-item"><strong>Ligand (SMILES):</strong> {smiles_cache}</div>
+                <div class="meta-item"><strong>Grid Box Coordinates:</strong> {grid_params['cx']}, {grid_params['cy']}, {grid_params['cz']}</div>
+                <div class="meta-item"><strong>Grid Box Dimensions:</strong> {grid_params['sx']} × {grid_params['sy']} × {grid_params['sz']}</div>
+            </div>
+
+            <div style="text-align: center; margin-bottom: 20px;">
+                <h4 style="color:#1e3c72;">Lead Ligand 2D Topology</h4>
+                <div class="structure-img">{p_2d}</div>
+            </div>
+
+            <h2>2. Docking Results Matrix</h2>
+            <div class="table-wrapper">
+                {res_html}
+            </div>
+
+            <h2>3. Local Contact Residues & Bond Assignments Matrix (Pose {selected_pose_orig})</h2>
+            <div class="table-wrapper">
+                {orig_matrix_html}
+            </div>
+
+            <h2>4. UFF Energy Minimization Dynamics</h2>
+            <div class="meta-grid" style="background:#e0f2fe; border-left:4px solid #0284c7;">
+                <div class="meta-item"><strong>Initial UFF Energy:</strong> {pre_uff} kcal/mol</div>
+                <div class="meta-item"><strong>Relaxed UFF Energy:</strong> {post_uff} kcal/mol</div>
+                <div class="meta-item"><strong>Force Field Delta (ΔE):</strong> {delta_uff} kcal/mol</div>
+            </div>
+            {uff_theory_html}
+
+            <h2>5. Interactive 3D Protein-Ligand View</h2>
+            <div id="container-3d-orig" style="height: 500px; width: 100%; position: relative; border-radius:8px; border:1px solid #eaeaea; background:#ffffff;"></div>
+            
+            <script src="https://cdnjs.cloudflare.com/ajax/libs/3Dmol/2.0.4/3Dmol-min.js"></script>
+            <script>
+                let viewer1 = $3Dmol.createViewer(document.getElementById('container-3d-orig'), {{backgroundColor: '#ffffff'}});
+                let rec_data = `{safe_rec}`; let lig_data_orig = `{safe_lig_orig}`;
+                if (rec_data.trim().length > 0) {{ viewer1.addModel(rec_data, 'pdb'); {style_js} }}
+                if (lig_data_orig.trim().length > 0) {{ viewer1.addModel(lig_data_orig, 'pdb'); viewer1.setStyle({{model: 1}}, {{stick: {{colorscheme: 'greenCarbon', radius: 0.28}}}}); }}
+                {surface_js} {int_lines_js1} viewer1.zoomTo(); viewer1.render();
+            </script>
+        </div>
+    </body>
+    </html>
+    """
+
 def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, shift_msg, f_img, v_2d, p_2d, 
                                     smiles_cache, baseline_affinity, grid_params, df_results, 
                                     orig_ints, new_ints, receptor_data, orig_ligand_pose_data, redesign_ligand_pose_data, 
                                     selected_pose_orig, selected_pose_new, style_mode, show_surface,
-                                    master_verdict, df_comparison_html, pre_uff, post_uff, delta_uff, active_retained_ions):
+                                    master_verdict, df_comparison_html, pre_uff, post_uff, delta_uff, active_retained_ions,
+                                    uff_theory_html, orig_matrix_html, new_matrix_html):
     
     if df_results is not None and not df_results.empty:
         res_html = '<table class="dataframe table"><thead><tr>'
@@ -736,13 +860,13 @@ def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, sh
                 <div class="meta-item"><strong>Grid Box Dimensions:</strong> {grid_params['sx']} × {grid_params['sy']} × {grid_params['sz']}</div>
             </div>
 
-            <h2>2. Optimization Dynamics & UFF Minimization</h2>
+            <h2>2. Optimization Dynamics & Derivative UFF Minimization</h2>
             <div class="meta-grid" style="background:#e0f2fe; border-left:4px solid #0284c7;">
                 <div class="meta-item"><strong>Initial UFF Energy:</strong> {pre_uff} kcal/mol</div>
                 <div class="meta-item"><strong>Relaxed UFF Energy:</strong> {post_uff} kcal/mol</div>
                 <div class="meta-item"><strong>Force Field Delta (ΔE):</strong> {delta_uff} kcal/mol</div>
-                <div class="meta-item"><strong>Methodology:</strong> Post-docking full-complex relaxation via Universal Force Field (UFF) gradient descent to resolve internal steric collisions.</div>
             </div>
+            {uff_theory_html}
 
             <h2>3. Validation Complex Analysis (Side-by-Side Comparison)</h2>
             <div style="display: flex; gap: 20px; margin-bottom: 20px; flex-wrap: wrap;">
@@ -774,6 +898,18 @@ def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, sh
             <p style="margin-top:20px;">Direct Thermodynamic Comparison Matrix</p>
             <div class="table-wrapper">
                 {df_comparison_html}
+            </div>
+
+            <h3>Local Contact Residues & Bond Assignments</h3>
+            <div style="display: flex; gap: 20px; flex-wrap: wrap;">
+                <div style="flex: 1; min-width: 300px;">
+                    <h4 style="color:#1e3c72;">Original Lead Matrices</h4>
+                    <div class="table-wrapper">{orig_matrix_html}</div>
+                </div>
+                <div style="flex: 1; min-width: 300px;">
+                    <h4 style="color:#1e3c72;">Derivative Matrices</h4>
+                    <div class="table-wrapper">{new_matrix_html}</div>
+                </div>
             </div>
 
             <h2>4. Generative Scaffold Optimization</h2>
@@ -1065,7 +1201,7 @@ with col_visual:
                     try: st.session_state.baseline_affinity = float(pose_affinity_score)
                     except ValueError: pass
                     
-                # SMART UFF MINIMIZATION LOGIC
+                # SMART UFF MINIMIZATION LOGIC & STORAGE
                 cache_key = f"uff_{st.session_state.protein_name}_{selected_pose}"
                 uff_progress_placeholder = st.empty()
                 if cache_key not in st.session_state.uff_cache:
@@ -1073,6 +1209,11 @@ with col_visual:
                     st.session_state.uff_cache[cache_key] = (pre_uff, post_uff, delta_uff)
                 uff_progress_placeholder.empty()
                 pre_uff, post_uff, delta_uff = st.session_state.uff_cache[cache_key]
+                
+                if selected_pose == 1:
+                    st.session_state.baseline_pre_uff = pre_uff
+                    st.session_state.baseline_post_uff = post_uff
+                    st.session_state.baseline_delta_uff = delta_uff
 
                 active_interactions = compute_spatial_interactions("protein.pdbqt", parsed_poses[selected_pose])
                 
@@ -1127,9 +1268,15 @@ with col_visual:
                 """
                 st.html(html_metric_card)
                 
-                with st.expander("📖 Understand UFF Minimization & Steric Clashes (Click to Read)"):
-                    st.markdown(f"**1. 📍 UFF Initial Energy: {pre_uff} kcal/mol**\nA highly positive energy score indicates extreme geometric tension, signifying atoms from your phytochemical were physically overlapping or positioned unnaturally close to the rigid atoms of the receptor (e.g., retained catalytic metal ions).")
-                    st.markdown(f"**2. 📉 Optimized Energy: {post_uff} kcal/mol**\nThe algorithm pushes overlapping atoms apart until the bond lengths and angles reach a naturally permissible state. The negative delta (**{delta_uff} kcal/mol**) proves the rigid collision was resolved.")
+                # --- EXPLICIT UFF EXPLANATION UI ---
+                st.markdown("#### 📖 Understand UFF Minimization & Steric Clashes")
+                st.info(f"""
+                **1. 📍 UFF Initial Energy: {pre_uff} kcal/mol**
+                This represents the total internal physical stress of the protein-ligand complex the moment AutoDock Vina finished placing your molecule into the pocket, *before* any relaxation occurred. A highly positive energy score indicates extreme geometric tension (a steric clash/rigid atomic wall effect). It means atoms from your phytochemical were physically overlapping or positioned unnaturally close to the rigid atoms of the receptor—most likely the catalytic metal ions or cofactors you specifically chose to retain. In a living biological system, atoms cannot overlap; they would repel each other and shift. But Vina's rigid grid didn't allow them to shift.
+
+                **2. 📉 Optimized Energy: {post_uff} kcal/mol**
+                This is the total stress of the complex *after* the Universal Force Field (UFF) algorithm ran its gradient descent optimization. The algorithm gently pushed overlapping atoms apart by fractions of an Angstrom until the bond lengths and angles reached a naturally permissible state. The negative force field delta (**{delta_uff} kcal/mol**) proves the rigid collision was successfully resolved!
+                """)
 
                 col_render, col_mesh = st.columns([1, 1])
                 with col_render:
@@ -1139,6 +1286,112 @@ with col_visual:
                     st.session_state.surf_toggle = st.checkbox("Overlay Translucent Pocket Cavity Mesh", value=False)
                     
                 render_advanced_modeling_blueprint(receptor_data=protein_data, ligand_data=parsed_poses[selected_pose], mode=st.session_state.style_mode, show_surface=st.session_state.surf_toggle, interactions_list=active_interactions, unique_id="container_phase1_result")
+
+                # --- PHASE 1 REPORT EXPORT ---
+                st.write("---")
+                st.subheader("📋 Phase 1: Local Contact Matrices & Report Generation")
+
+                st.markdown("#### 🧬 Local Contact Residues & Bond Assignments Matrix")
+                if active_interactions:
+                    df_int = pd.DataFrame(active_interactions)
+                    st.dataframe(df_int[["Residue Contact", "Interaction Type", "Distance (Å)"]], hide_index=True, use_container_width=True)
+                else:
+                    st.info("No close contacts detected within a 3.8 Å threshold radius.")
+
+                include_uff_theory = st.checkbox("Include detailed UFF biophysical explanation in the generated reports", value=True, key="p1_uff_toggle")
+                
+                report_uff_theory_text = ""
+                report_uff_theory_html = ""
+                if include_uff_theory:
+                    report_uff_theory_text = f"""
+7. UFF MINIMIZATION BIOPHYSICAL EXPLANATION
+-------------------------------------------------------
+- 📍 UFF Initial Energy: {pre_uff} kcal/mol
+  This represents the total internal physical stress of the protein-ligand complex the moment AutoDock Vina finished placing your molecule into the pocket, before any relaxation occurred. A highly positive energy score indicates extreme geometric tension, often a steric clash where atoms physically overlap with rigid atoms of the receptor or retained catalytic cofactors. In a living biological system, atoms shift to relieve this, but a rigid grid does not allow it.
+
+- 📉 Optimized Energy: {post_uff} kcal/mol
+  This is the total stress of the complex after the Universal Force Field (UFF) algorithm ran its gradient descent optimization. The algorithm took the overlapping atoms and gently pushed them apart by fractions of an Angstrom until the bond lengths and angles reached a naturally permissible state, making the system structurally stable. The critical metric is the massive drop from the initial state ({delta_uff} kcal/mol).
+"""
+                    report_uff_theory_html = f"""
+                    <div class="section" style="background-color: #f9fbff; border-left: 6px solid #00509e;">
+                        <h2>7. UFF Minimization Biophysical Explanation</h2>
+                        <p><b>📍 UFF Initial Energy: {pre_uff} kcal/mol</b></p>
+                        <p>This represents the total internal physical stress of the protein-ligand complex the moment AutoDock Vina finished placing your molecule into the pocket, before any relaxation occurred. A highly positive energy score indicates extreme geometric tension. This is the mathematical signature of a steric clash (the "rigid atomic wall" effect). It means atoms from your phytochemical were physically overlapping or positioned unnaturally close to the rigid atoms of the receptor—most likely the catalytic metal ions or cofactors you specifically chose to retain. In a living biological system, atoms cannot overlap; they would repel each other and shift. But Vina's rigid grid didn't allow them to shift, resulting in this artificially high stress value.</p>
+                        
+                        <p><b>📉 Optimized Energy: {post_uff} kcal/mol</b></p>
+                        <p>This is the total stress of the complex after the Universal Force Field (UFF) algorithm ran its gradient descent optimization. The algorithm took the overlapping atoms and gently pushed them apart by fractions of an Angstrom until the bond lengths and angles reached a naturally permissible state. The system is now structurally stable. What matters is not that the final number is positive, but how far it dropped from the initial state (<b>{delta_uff} kcal/mol</b>).</p>
+                    </div>
+                    """
+
+                p1_int_text = format_interaction_matrix_text(active_interactions)
+
+                st.markdown("**Quick Copy-Paste Citation Report (Phase 1 Baseline)**")
+                report_content_p1 = f"""=======================================================
+MOLECULAR DOCKING SCREENING ANALYSIS REPORT (PHASE 1)
+Generated dynamically via InSilico BioSphere Docking Tool
+Developed by: Dr. Sarang S. Dhote, Assistant Professor, Department of Chemistry, Shivaji Science College, Nagpur, India | Contact: sarangresearch@gmail.com
+=======================================================
+
+1. TARGET RECEPTOR MACROMOLECULE PROFILE
+-------------------------------------------------------
+- Target Protein Name: {st.session_state.protein_name}
+- Target Configuration Identifier (PDB ID): {st.session_state.pdb_id_display}
+- Primary Structure Data Source: RCSB Protein Data Bank Server / Local Upload
+- Catalytic Cofactors & Heteroatom Filter configured by user: {st.session_state.active_retained_ions}
+
+2. SMALL MOLECULE DRUG LIGAND PROFILE
+-------------------------------------------------------
+- Input Structural Identity Matrix: {st.session_state.get('smiles_cache', 'Uploaded File Data Track')}
+- Compiled Chemical Attributes: {st.session_state.ligand_summary_text.replace('**','')}
+
+3. BOUND SPACE CONFIGURATION MECHANICS (GRID BOX)
+-------------------------------------------------------
+- Center Coordinates Vector (X, Y, Z): ({grid_cx}, {grid_cy}, {grid_cz})
+- Grid Bounding Dimensions (X, Y, Z): ({grid_sx} Å, {grid_sy} Å, {grid_sz} Å)
+- Search Algorithm Exhaustiveness Index: {exhaustiveness}
+- Grid Alignment Target: {st.session_state.selected_native_ligand}
+
+4. ACTIVE POSE COMPLEX BINDING METRICS (SELECTED MODE)
+-------------------------------------------------------
+- Target Alignment Selection Mode: Mode {selected_pose} Pose Fit
+- Computed Gibbs Free Energy Affinity: {pose_affinity_score} kcal/mol
+- Measured Total Spatial Proximity Contact Atoms: {len(active_interactions)}
+- UFF Post-Docking Energy Parameters: Initial: {pre_uff} | Relaxed: {post_uff} | Delta: {delta_uff} kcal/mol
+
+5. LOCAL CONTACT RESIDUES & BOND ASSIGNMENTS MATRIX
+-------------------------------------------------------
+{p1_int_text}
+
+6. SCIENTIFIC METHODOLOGY & MANUSCRIPT CITATION TRACK
+-------------------------------------------------------
+Molecular docking was performed using the semi-empirical force field parameters of AutoDock Vina inside the InSilico BioSphere framework. To maintain structural and biological validity, essential catalytic cofactor ions were explicitly preserved within the target binding cleft during search configurations. Potential localized steric constraints and rigid atomic wall collisions resulting from structural constraints were resolved by subjecting the final protein-ligand complexes to post-docking energy minimization using the Universal Force Field (UFF) optimized to a convergence tolerance of 10^-4 kcal/mol·Å.
+
+Manuscript Citation Format Block:
+Dr. Sarang S. Dhote, "InSilico BioSphere: An Integrated Platform for Automated Molecular Docking, Surface Cavity Profiling, and Post-Docking Force-Field Relaxation Mechanics." Department of Chemistry, Shri Shivaji Science College, Nagpur, India. Correspondence: sarangresearch@gmail.com
+{report_uff_theory_text}=======================================================
+"""
+                st.text_area("Copy Phase 1 Report Text directly:", value=report_content_p1, height=250, key="p1_text_area")
+
+                meta_data = extract_pdb_metadata(st.session_state.local_target_path, st.session_state.pdb_id_display) if st.session_state.local_target_path else {"id":"Custom","title":"Uploaded Structure File","method":"N/A","res":"N/A"}
+                meta_data['name'], meta_data['id'] = st.session_state.protein_name, st.session_state.pdb_id_display
+                b_img = generate_clean_2d_image(st.session_state.smiles_cache, include_labels=False, zoom_level=420)
+                grid_params = {'cx': st.session_state.cx, 'cy': st.session_state.cy, 'cz': st.session_state.cz, 'sx': st.session_state.sx, 'sy': st.session_state.sy, 'sz': st.session_state.sz, 'exh': st.session_state.exhaustiveness}
+                df_results_p1 = parse_vina_output_with_residues_global(st.session_state.docking_results_raw, "docking_poses.pdbqt")
+                
+                df_int_orig = pd.DataFrame(active_interactions)
+                orig_matrix_html = df_int_orig[["Residue Contact", "Interaction Type", "Distance (Å)"]].to_html(index=False, classes="data-table") if not df_int_orig.empty else "<p>No close contacts detected.</p>"
+
+                p1_html_report = build_phase1_html_report(
+                    meta=meta_data, p_2d=b_img, smiles_cache=st.session_state.smiles_cache, 
+                    grid_params=grid_params, df_results=df_results_p1, orig_ints=active_interactions, 
+                    receptor_data=protein_data, orig_ligand_pose_data=parsed_poses[selected_pose], 
+                    selected_pose_orig=selected_pose, style_mode=st.session_state.style_mode, 
+                    show_surface=st.session_state.surf_toggle, pre_uff=pre_uff, post_uff=post_uff, 
+                    delta_uff=delta_uff, active_retained_ions=st.session_state.active_retained_ions,
+                    uff_theory_html=report_uff_theory_html, orig_matrix_html=orig_matrix_html
+                )
+
+                st.download_button(label="📥 Download Phase 1 HTML Research Report", data=p1_html_report, file_name=f"InSilico_Phase1_Report_{st.session_state.pdb_id_display}.html", mime="text/html", use_container_width=True, key="dl_phase1")
 
 # --- ENGINE EXECUTION ---
 if run_btn and can_dock:
@@ -1186,16 +1439,8 @@ if st.session_state.docking_results_raw is not None:
     if not df_results.empty:
         col_table, col_export = st.columns([2, 1])
         with col_table: 
-            def color_affinity(val):
-                try:
-                    v = float(val)
-                    if v < 0: return 'color: #10b981; font-weight: bold;'
-                    elif v > 0: return 'color: #ef4444; font-weight: bold;'
-                except: pass
-                return 'color: black'
-            try: styled_df = df_results.style.map(color_affinity, subset=['Affinity (kcal/mol)'])
-            except AttributeError: styled_df = df_results.style.applymap(color_affinity, subset=['Affinity (kcal/mol)'])
-            st.dataframe(styled_df, hide_index=True, use_container_width=True)
+            # Replaced complex styling with standard output for visibility in all themes
+            st.dataframe(df_results, hide_index=True, use_container_width=True)
             
         with col_export:
             csv_data = df_results.to_csv(index=False).encode('utf-8')
@@ -1428,29 +1673,32 @@ else:
             with col_3d_2:
                 st.markdown(f"#### Redesigned Derivative (Pose {p4_sel_pose})")
                 render_advanced_modeling_blueprint(p_data, p4_poses[p4_sel_pose], mode=st.session_state.style_mode, show_surface=st.session_state.surf_toggle, interactions_list=new_ints, unique_id="p4_new_viewer")
+            
+            # --- EXPLICIT UFF EXPLANATION UI (PHASE 4) ---
+            st.markdown("#### 📖 Understand UFF Minimization & Steric Clashes")
+            st.info(f"""
+            **1. 📍 UFF Initial Energy: {pre_uff} kcal/mol**
+            This represents the total internal physical stress of the protein-ligand complex the moment AutoDock Vina finished placing your molecule into the pocket, *before* any relaxation occurred. A highly positive energy score indicates extreme geometric tension (a steric clash/rigid atomic wall effect). It means atoms from your phytochemical were physically overlapping or positioned unnaturally close to the rigid atoms of the receptor—most likely the catalytic metal ions or cofactors you specifically chose to retain. In a living biological system, atoms cannot overlap; they would repel each other and shift. But Vina's rigid grid didn't allow them to shift.
+
+            **2. 📉 Optimized Energy: {post_uff} kcal/mol**
+            This is the total stress of the complex *after* the Universal Force Field (UFF) algorithm ran its gradient descent optimization. The algorithm gently pushed overlapping atoms apart by fractions of an Angstrom until the bond lengths and angles reached a naturally permissible state. The negative force field delta (**{delta_uff} kcal/mol**) proves the rigid collision was successfully resolved!
+            """)
 
             st.markdown("#### ⚖️ Direct Thermodynamic Comparison Matrix")
+            
+            # Formating actual Phase 1 UFF value safely
+            orig_delta = st.session_state.get('baseline_delta_uff', "N/A")
+            if orig_delta != "N/A": orig_delta = f"{orig_delta} kcal/mol"
+            
             comp_data = {
                 "Metric": ["Gibbs Free Energy (ΔG)", "UFF Minimization Delta", "Pocket Residue Contacts", "Identified Interaction Types"],
-                "Original Lead": [f"{orig_aff} kcal/mol" if orig_aff else "N/A", "See Phase 1 Dashboard", o_res, o_bonds],
+                "Original Lead": [f"{orig_aff} kcal/mol" if orig_aff else "N/A", orig_delta, o_res, o_bonds],
                 "Optimized Derivative": [f"{new_aff_str} kcal/mol", f"{delta_uff} kcal/mol", n_res, n_bonds]
             }
             df_comp = pd.DataFrame(comp_data)
             
-            def color_comparison(val):
-                try:
-                    if "kcal/mol" in str(val) and "Delta" not in val:
-                        v = float(val.split()[0])
-                        orig_v = float(orig_aff) if orig_aff else 0.0
-                        if v < orig_v: return 'color: #10b981; font-weight: bold;'
-                        elif v > orig_v: return 'color: #ef4444; font-weight: bold;'
-                    else: return 'color: #d97706; font-weight: bold;'
-                except: pass
-                return 'color: black'
-
-            try: styled_comp = df_comp.style.map(color_comparison, subset=['Optimized Derivative'])
-            except AttributeError: styled_comp = df_comp.style.applymap(color_comparison, subset=['Optimized Derivative'])
-            st.dataframe(styled_comp, hide_index=True, use_container_width=True)
+            # Using standard dataframe for visibility (avoids broken font colors in dark mode)
+            st.dataframe(df_comp, hide_index=True, use_container_width=True)
             
             try: delta_aff = round(float(new_aff_str) - float(orig_aff), 2) if orig_aff else 0.0
             except: delta_aff = 0.0
@@ -1469,7 +1717,98 @@ else:
 
             # --- REPORT EXPORT ---
             st.write("---")
-            st.subheader("Data Export & Manuscript Support Systems")
+            st.subheader("📋 Phase 4: Local Contact Matrices & Final Report Generation")
+            
+            st.markdown("#### 🧬 Local Contact Residues & Bond Assignments Matrix")
+            col_rm1, col_rm2 = st.columns(2)
+            with col_rm1:
+                st.markdown("**Original Lead Contacts**")
+                if orig_ints: st.dataframe(pd.DataFrame(orig_ints)[["Residue Contact", "Interaction Type", "Distance (Å)"]], hide_index=True)
+                else: st.info("No close contacts.")
+            with col_rm2:
+                st.markdown("**Optimized Derivative Contacts**")
+                if new_ints: st.dataframe(pd.DataFrame(new_ints)[["Residue Contact", "Interaction Type", "Distance (Å)"]], hide_index=True)
+                else: st.info("No close contacts.")
+
+            include_uff_theory = st.checkbox("Include detailed UFF biophysical explanation in the generated reports", value=True, key="p4_uff_toggle")
+            
+            report_uff_theory_text = ""
+            report_uff_theory_html = ""
+            if include_uff_theory:
+                report_uff_theory_text = f"""
+7. UFF MINIMIZATION BIOPHYSICAL EXPLANATION
+-------------------------------------------------------
+- 📍 UFF Initial Energy: {pre_uff} kcal/mol
+  This represents the total internal physical stress of the protein-ligand complex the moment AutoDock Vina finished placing your molecule into the pocket, before any relaxation occurred. A highly positive energy score indicates extreme geometric tension, often a steric clash where atoms physically overlap with rigid atoms of the receptor or retained catalytic cofactors. In a living biological system, atoms shift to relieve this, but a rigid grid does not allow it.
+
+- 📉 Optimized Energy: {post_uff} kcal/mol
+  This is the total stress of the complex after the Universal Force Field (UFF) algorithm ran its gradient descent optimization. The algorithm took the overlapping atoms and gently pushed them apart by fractions of an Angstrom until the bond lengths and angles reached a naturally permissible state, making the system structurally stable. The critical metric is the massive drop from the initial state ({delta_uff} kcal/mol).
+"""
+                report_uff_theory_html = f"""
+                <div class="section" style="background-color: #f9fbff; border-left: 6px solid #00509e;">
+                    <h2>7. UFF Minimization Biophysical Explanation</h2>
+                    <p><b>📍 UFF Initial Energy: {pre_uff} kcal/mol</b></p>
+                    <p>This represents the total internal physical stress of the protein-ligand complex the moment AutoDock Vina finished placing your molecule into the pocket, before any relaxation occurred. A highly positive energy score indicates extreme geometric tension. This is the mathematical signature of a steric clash (the "rigid atomic wall" effect). It means atoms from your phytochemical were physically overlapping or positioned unnaturally close to the rigid atoms of the receptor—most likely the catalytic metal ions or cofactors you specifically chose to retain. In a living biological system, atoms cannot overlap; they would repel each other and shift. But Vina's rigid grid didn't allow them to shift, resulting in this artificially high stress value.</p>
+                    
+                    <p><b>📉 Optimized Energy: {post_uff} kcal/mol</b></p>
+                    <p>This is the total stress of the complex after the Universal Force Field (UFF) algorithm ran its gradient descent optimization. The algorithm took the overlapping atoms and gently pushed them apart by fractions of an Angstrom until the bond lengths and angles reached a naturally permissible state. The system is now structurally stable. What matters is not that the final number is positive, but how far it dropped from the initial state (<b>{delta_uff} kcal/mol</b>).</p>
+                </div>
+                """
+
+            p4_int_text_o = format_interaction_matrix_text(orig_ints)
+            p4_int_text_n = format_interaction_matrix_text(new_ints)
+
+            st.markdown("**Quick Copy-Paste Citation Report (Phase 4 Final Validation)**")
+            report_content_p4 = f"""=======================================================
+MOLECULAR DOCKING SCREENING ANALYSIS REPORT (FINAL VALIDATION)
+Generated dynamically via InSilico BioSphere Docking Tool
+Developed by: Dr. Sarang S. Dhote, Assistant Professor, Department of Chemistry, Shivaji Science College, Nagpur, India | Contact: sarangresearch@gmail.com
+=======================================================
+
+1. TARGET RECEPTOR MACROMOLECULE PROFILE
+-------------------------------------------------------
+- Target Protein Name: {st.session_state.protein_name}
+- Target Configuration Identifier (PDB ID): {st.session_state.pdb_id_display}
+- Primary Structure Data Source: RCSB Protein Data Bank Server / Local Upload
+- Catalytic Cofactors & Heteroatom Filter configured by user: {st.session_state.active_retained_ions}
+
+2. SMALL MOLECULE DRUG LIGAND PROFILE
+-------------------------------------------------------
+- Input Structural Identity Matrix: {st.session_state.get('smiles_cache', 'Uploaded File Data Track')}
+- Compiled Chemical Attributes: {st.session_state.ligand_summary_text.replace('**','')}
+
+3. BOUND SPACE CONFIGURATION MECHANICS (GRID BOX)
+-------------------------------------------------------
+- Center Coordinates Vector (X, Y, Z): ({grid_cx}, {grid_cy}, {grid_cz})
+- Grid Bounding Dimensions (X, Y, Z): ({grid_sx} Å, {grid_sy} Å, {grid_sz} Å)
+- Search Algorithm Exhaustiveness Index: {exhaustiveness}
+
+4. ACTIVE POSE COMPLEX BINDING METRICS (COMPARING OPTIMIZED DERIVATIVE VS ORIGINAL)
+-------------------------------------------------------
+- Target Alignment Selection Mode: Mode {selected_pose} Pose Fit
+- Original Gibbs Free Energy Affinity: {orig_aff} kcal/mol
+- Redesigned Gibbs Free Energy Affinity: {new_aff_str} kcal/mol
+- Measured Total Spatial Proximity Contact Atoms: {len(new_ints)}
+- Derivative UFF Post-Docking Energy Parameters: Initial: {pre_uff} | Relaxed: {post_uff} | Delta: {delta_uff} kcal/mol
+
+5. LOCAL CONTACT RESIDUES & BOND ASSIGNMENTS MATRIX
+-------------------------------------------------------
+[ ORIGINAL LEAD MATRIX ]
+{p4_int_text_o}
+
+[ REDESIGNED DERIVATIVE MATRIX ]
+{p4_int_text_n}
+
+6. SCIENTIFIC METHODOLOGY & MANUSCRIPT CITATION TRACK
+-------------------------------------------------------
+Molecular docking was performed using the semi-empirical force field parameters of AutoDock Vina inside the InSilico BioSphere framework. To maintain structural and biological validity, essential catalytic cofactor ions were explicitly preserved within the target binding cleft during search configurations. Potential localized steric constraints and rigid atomic wall collisions resulting from structural constraints were resolved by subjecting the final protein-ligand complexes to post-docking energy minimization using the Universal Force Field (UFF) optimized to a convergence tolerance of 10^-4 kcal/mol·Å.
+
+Manuscript Citation Format Block:
+Dr. Sarang S. Dhote, "InSilico BioSphere: An Integrated Platform for Automated Molecular Docking, Surface Cavity Profiling, and Post-Docking Force-Field Relaxation Mechanics." Department of Chemistry, Shri Shivaji Science College, Nagpur, India. Correspondence: sarangresearch@gmail.com
+{report_uff_theory_text}=======================================================
+"""
+            st.text_area("Copy Phase 4 Report Text directly:", value=report_content_p4, height=250, key="p4_text_area")
+
             meta_data = extract_pdb_metadata(st.session_state.local_target_path, st.session_state.pdb_id_display) if st.session_state.local_target_path else {"id":"Custom","title":"Uploaded Structure File","method":"N/A","res":"N/A"}
             meta_data['name'], meta_data['id'] = st.session_state.protein_name, st.session_state.pdb_id_display
             b_img = generate_clean_2d_image(st.session_state.smiles_cache, include_labels=False, zoom_level=420)
@@ -1477,21 +1816,19 @@ else:
             
             df_comparison_html = '<table class="dataframe table"><thead><tr><th>Metric</th><th>Original Lead</th><th>Optimized Derivative</th></tr></thead><tbody>'
             for _, r in df_comp.iterrows():
-                val = r['Optimized Derivative']
-                style = 'style="color: #d97706; font-weight: bold;"'
-                if "kcal/mol" in str(val) and "Delta" not in val and orig_aff:
-                    try:
-                        v, orig_v = float(val.split()[0]), float(orig_aff)
-                        if v < orig_v: style = 'style="color: #10b981; font-weight: bold;"'
-                        elif v > orig_v: style = 'style="color: #ef4444; font-weight: bold;"'
-                    except: pass
-                df_comparison_html += f"<tr><td>{r['Metric']}</td><td>{r['Original Lead']}</td><td {style}>{val}</td></tr>"
+                val = str(r['Optimized Derivative'])
+                df_comparison_html += f"<tr><td>{r['Metric']}</td><td>{r['Original Lead']}</td><td style='font-weight: bold;'>{val}</td></tr>"
             df_comparison_html += '</tbody></table>'
 
             df_results = parse_vina_output_with_residues_global(st.session_state.redesign_docking_results_raw, "redesign_docking_poses.pdbqt")
             try:
                 with open("protein.pdbqt", "r") as f: receptor_data = f.read()
             except: receptor_data = ""
+
+            df_int_orig = pd.DataFrame(orig_ints)
+            orig_matrix_html = df_int_orig[["Residue Contact", "Interaction Type", "Distance (Å)"]].to_html(index=False, classes="data-table") if not df_int_orig.empty else "<p>No close contacts detected.</p>"
+            df_int_new = pd.DataFrame(new_ints)
+            new_matrix_html = df_int_new[["Residue Contact", "Interaction Type", "Distance (Å)"]].to_html(index=False, classes="data-table") if not df_int_new.empty else "<p>No close contacts detected.</p>"
 
             html_report = build_comprehensive_html_report(
                 meta=meta_data, adme_p=adme_p, adme_v=adme_v, variant_row=v_row, iupac=iupac, shift_msg=shift_msg, 
@@ -1501,7 +1838,8 @@ else:
                 redesign_ligand_pose_data=p4_poses[p4_sel_pose], selected_pose_orig=st.session_state.get('selected_pose_export', 1), 
                 selected_pose_new=p4_sel_pose, style_mode=st.session_state.style_mode, show_surface=st.session_state.surf_toggle,
                 master_verdict=master_verdict, df_comparison_html=df_comparison_html, pre_uff=pre_uff, post_uff=post_uff, delta_uff=delta_uff,
-                active_retained_ions=st.session_state.active_retained_ions
+                active_retained_ions=st.session_state.active_retained_ions, uff_theory_html=report_uff_theory_html,
+                orig_matrix_html=orig_matrix_html, new_matrix_html=new_matrix_html
             )
             
             st.download_button(label="📥 Download Consolidated Manuscript Quality HTML Research Report", data=html_report, file_name=f"InSilico_BioSphere_Research_Record_{v_row['Variant ID']}.html", mime="text/html", use_container_width=True, key="dl_phase4")
