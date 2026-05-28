@@ -61,8 +61,6 @@ def initialize_session_states():
         "redesign_baseline_affinity": None,
         "rd_library": None,
         "selected_variant_id": None,
-        "style_mode": "cartoon",
-        "surf_toggle": False,
         "active_retained_ions": "None",
         "uff_cache": {},
         "last_uploaded_protein": "",
@@ -236,7 +234,6 @@ def identify_protein_cavities(pdbqt_file, max_pockets=5):
     return final_pockets
 
 def compute_protein_bounding_box(pdbqt_file):
-    """Calculates the center and size of the full macromolecule for blind docking."""
     if not os.path.exists(pdbqt_file): return 0, 0, 0, 20, 20, 20
     coords = []
     with open(pdbqt_file, 'r') as f:
@@ -429,7 +426,14 @@ def parse_vina_output_with_residues_global(stdout_text, docking_file="docking_po
                     if ints:
                         res_string = ", ".join(sorted(list(set([i["Residue Contact"] for i in ints]))))
                         bond_types = ", ".join(sorted(list(set([i["Interaction Type"] for i in ints]))))
-                data.append({"Binding Mode": mode_idx, "Affinity (kcal/mol)": aff, "RMSD l.b.": rmsd_lb, "RMSD u.b.": rmsd_ub, "Interacting Residues": res_string, "Contact Bond Types": bond_types})
+                data.append({
+                    "Binding Mode": mode_idx, 
+                    "Affinity (kcal/mol)": round(aff, 2), 
+                    "RMSD l.b.": round(rmsd_lb, 2), 
+                    "RMSD u.b.": round(rmsd_ub, 2), 
+                    "Interacting Residues": res_string, 
+                    "Contact Bond Types": bond_types
+                })
             except ValueError: continue
     return pd.DataFrame(data)
 
@@ -663,9 +667,13 @@ def build_phase1_html_report(meta, p_2d, smiles_cache, grid_params, df_results, 
             for col in df_results.columns:
                 val = row[col]
                 style = ''
-                if col == 'Affinity (kcal/mol)' and isinstance(val, (int, float)):
-                    if val < 0: style = 'style="color: #10b981; font-weight: bold;"'
-                    elif val > 0: style = 'style="color: #ef4444; font-weight: bold;"'
+                if isinstance(val, float): val = f"{val:.2f}"
+                if col == 'Affinity (kcal/mol)':
+                    try:
+                        v = float(val)
+                        if v < 0: style = 'style="color: #10b981; font-weight: bold;"'
+                        elif v > 0: style = 'style="color: #ef4444; font-weight: bold;"'
+                    except: pass
                 res_html += f'<td {style}>{val}</td>'
             res_html += '</tr>'
         res_html += '</tbody></table>'
@@ -681,7 +689,8 @@ def build_phase1_html_report(meta, p_2d, smiles_cache, grid_params, df_results, 
 
     if style_mode == 'cartoon': style_js = "viewer1.setStyle({model: 0}, {cartoon: {colorscheme: 'chain', style: 'oval', thickness: 0.6}});"
     elif style_mode == 'spacefill': style_js = "viewer1.setStyle({model: 0}, {sphere: {colorscheme: 'chain', radius:1.1}});"
-    else: style_js = "viewer1.setStyle({model: 0}, {stick: {colorscheme: 'chain', radius:0.25}});"
+    elif style_mode == 'sticks': style_js = "viewer1.setStyle({model: 0}, {stick: {colorscheme: 'chain', radius:0.25}});"
+    else: style_js = "viewer1.setStyle({model: 0}, {cartoon: {colorscheme: 'chain', style: 'oval', thickness: 0.6}});"
         
     surface_js = "viewer1.addSurface($3Dmol.SurfaceType.VDW, {opacity:0.45, colorscheme:{prop:'b',gradient:'rwb'}}, {model:0});" if show_surface else ""
     
@@ -698,6 +707,8 @@ def build_phase1_html_report(meta, p_2d, smiles_cache, grid_params, df_results, 
             .header-banner p {{ margin: 5px 0 0 0; font-size: 14px; opacity: 0.9; }}
             .container {{ max-width: 1000px; margin: 30px auto; background: white; padding: 40px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); }}
             h2 {{ color: #1e3c72; border-bottom: 2px solid #eef2f7; padding-bottom: 8px; margin-top: 35px; font-size: 20px; }}
+            h3 {{ color: #2a5298; font-size: 16px; margin-top: 20px; }}
+            h4 {{ color: #2a5298; font-size: 15px; margin-top: 15px; text-align: center; }}
             .meta-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; background: #f4f7f6; padding: 20px; border-radius: 8px; }}
             .meta-item {{ font-size: 14px; }}
             .meta-item strong {{ color: #1e3c72; }}
@@ -715,19 +726,18 @@ def build_phase1_html_report(meta, p_2d, smiles_cache, grid_params, df_results, 
         </div>
         
         <div class="container">
-            <h2>1. Target Receptor & Ligand Profile</h2>
+            <h2>1. Baseline Docking Configuration & Target Matrix</h2>
             <div class="meta-grid">
                 <div class="meta-item"><strong>Target Protein:</strong> {meta['name']}</div>
                 <div class="meta-item"><strong>PDB ID:</strong> {meta['id']}</div>
                 <div class="meta-item"><strong>Catalytic Cofactors Filter:</strong> {active_retained_ions}</div>
-                <div class="meta-item"><strong>Ligand (SMILES):</strong> {smiles_cache}</div>
+                <div class="meta-item"><strong>Ligand (SMILES):</strong> <span style="word-break: break-all; font-family: monospace;">{smiles_cache}</span></div>
                 <div class="meta-item"><strong>Grid Search Strategy:</strong> {grid_strategy}</div>
-                <div class="meta-item"><strong>Grid Box Coordinates:</strong> {grid_params['cx']}, {grid_params['cy']}, {grid_params['cz']}</div>
-                <div class="meta-item"><strong>Grid Box Dimensions:</strong> {grid_params['sx']} × {grid_params['sy']} × {grid_params['sz']}</div>
+                <div class="meta-item"><strong>Grid Box (X,Y,Z / Dim):</strong> ({grid_params['cx']}, {grid_params['cy']}, {grid_params['cz']}) / {grid_params['sx']}×{grid_params['sy']}×{grid_params['sz']}</div>
             </div>
 
             <div style="text-align: center; margin-bottom: 20px;">
-                <h4 style="color:#1e3c72;">Lead Ligand 2D Topology</h4>
+                <h4>Lead Ligand 2D Topology</h4>
                 <div class="structure-img">{p_2d}</div>
             </div>
 
@@ -784,9 +794,13 @@ def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, sh
             for col in df_results.columns:
                 val = row[col]
                 style = ''
-                if col == 'Affinity (kcal/mol)' and isinstance(val, (int, float)):
-                    if val < 0: style = 'style="color: #10b981; font-weight: bold;"'
-                    elif val > 0: style = 'style="color: #ef4444; font-weight: bold;"'
+                if isinstance(val, float): val = f"{val:.2f}"
+                if col == 'Affinity (kcal/mol)':
+                    try:
+                        v = float(val)
+                        if v < 0: style = 'style="color: #10b981; font-weight: bold;"'
+                        elif v > 0: style = 'style="color: #ef4444; font-weight: bold;"'
+                    except: pass
                 res_html += f'<td {style}>{val}</td>'
             res_html += '</tr>'
         res_html += '</tbody></table>'
@@ -814,9 +828,12 @@ def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, sh
     elif style_mode == 'spacefill':
         style_js = "viewer1.setStyle({model: 0}, {sphere: {colorscheme: 'chain', radius:1.1}});"
         style_js2 = "viewer2.setStyle({model: 0}, {sphere: {colorscheme: 'chain', radius:1.1}});"
-    else:
+    elif style_mode == 'sticks':
         style_js = "viewer1.setStyle({model: 0}, {stick: {colorscheme: 'chain', radius:0.25}});"
         style_js2 = "viewer2.setStyle({model: 0}, {stick: {colorscheme: 'chain', radius:0.25}});"
+    else:
+        style_js = "viewer1.setStyle({model: 0}, {cartoon: {colorscheme: 'chain', style: 'oval', thickness: 0.6}});"
+        style_js2 = "viewer2.setStyle({model: 0}, {cartoon: {colorscheme: 'chain', style: 'oval', thickness: 0.6}});"
         
     surface_js = "viewer1.addSurface($3Dmol.SurfaceType.VDW, {opacity:0.45, colorscheme:{prop:'b',gradient:'rwb'}}, {model:0});" if show_surface else ""
     surface_js2 = "viewer2.addSurface($3Dmol.SurfaceType.VDW, {opacity:0.45, colorscheme:{prop:'b',gradient:'rwb'}}, {model:0});" if show_surface else ""
@@ -836,6 +853,7 @@ def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, sh
             .container {{ max-width: 1000px; margin: 30px auto; background: white; padding: 40px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); }}
             h2 {{ color: #1e3c72; border-bottom: 2px solid #eef2f7; padding-bottom: 8px; margin-top: 35px; font-size: 20px; }}
             h3 {{ color: #2a5298; font-size: 16px; margin-top: 20px; }}
+            h4 {{ color: #2a5298; font-size: 15px; margin-top: 15px; text-align: center; }}
             .meta-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; background: #f4f7f6; padding: 20px; border-radius: 8px; }}
             .meta-item {{ font-size: 14px; }}
             .meta-item strong {{ color: #1e3c72; }}
@@ -872,21 +890,16 @@ def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, sh
                 <div class="meta-item"><strong>Search Exhaustiveness:</strong> {grid_params['exh']}</div>
             </div>
 
-            <h2>2. Baseline Molecular Docking Screening Results</h2>
-            <div class="table-wrapper">
-                {res_html}
-            </div>
-
-            <h2>3. Validation Complex Analysis (Side-by-Side Comparison)</h2>
+            <h2>2. Validation Complex Analysis (Side-by-Side Comparison)</h2>
             <p>Interactive 3D representation comparing the original lead and the redesigned derivative inside the target receptor pocket.</p>
             
             <div style="display: flex; gap: 20px; margin-bottom: 20px; flex-wrap: wrap;">
                 <div style="flex: 1; min-width: 300px;">
-                    <h4 style="color:#1e3c72; text-align:center;">Original Lead (Pose {selected_pose_orig})</h4>
+                    <h4>Original Lead (Pose {selected_pose_orig})</h4>
                     <div id="container-3d-orig" style="height: 400px; width: 100%; position: relative; border-radius:8px; border:1px solid #eaeaea; background:#ffffff; box-shadow: 0 4px 10px rgba(0,0,0,0.05);"></div>
                 </div>
                 <div style="flex: 1; min-width: 300px;">
-                    <h4 style="color:#1e3c72; text-align:center;">Optimized Derivative (Pose {selected_pose_new})</h4>
+                    <h4>Optimized Derivative (Pose {selected_pose_new})</h4>
                     <div id="container-3d-redesign" style="height: 400px; width: 100%; position: relative; border-radius:8px; border:1px solid #eaeaea; background:#ffffff; box-shadow: 0 4px 10px rgba(0,0,0,0.05);"></div>
                 </div>
             </div>
@@ -935,16 +948,16 @@ def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, sh
             <h3>Local Contact Residues & Bond Assignments</h3>
             <div style="display: flex; gap: 20px; flex-wrap: wrap;">
                 <div style="flex: 1; min-width: 300px;">
-                    <h4 style="color:#1e3c72;">Original Lead Matrices</h4>
+                    <h4>Original Lead Matrices</h4>
                     <div class="table-wrapper">{orig_matrix_html}</div>
                 </div>
                 <div style="flex: 1; min-width: 300px;">
-                    <h4 style="color:#1e3c72;">Derivative Matrices</h4>
+                    <h4>Derivative Matrices</h4>
                     <div class="table-wrapper">{new_matrix_html}</div>
                 </div>
             </div>
 
-            <h2>4. Generative Scaffold Optimization</h2>
+            <h2>3. Generative Scaffold Optimization</h2>
             <div class="meta-grid">
                 <div class="meta-item"><strong>Isolated Variant ID:</strong> {variant_row['Variant ID']}</div>
                 <div class="meta-item"><strong>Appended Fragment:</strong> {variant_row['Fragment Added']}</div>
@@ -954,11 +967,11 @@ def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, sh
             
             <div class="structure-box">
                 <div style="flex:1; text-align: center;">
-                    <h4 style="color:#1e3c72; margin-bottom:10px;">Original Phytochemical Lead</h4>
+                    <h4>Original Phytochemical Lead</h4>
                     <div class="structure-img">{p_2d}</div>
                 </div>
                 <div style="flex:1; text-align: center;">
-                    <h4 style="color:#1e3c72; margin-bottom:10px;">Optimized Derivative</h4>
+                    <h4>Optimized Derivative</h4>
                     <div class="structure-img">{v_2d}</div>
                 </div>
             </div>
@@ -969,7 +982,7 @@ def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, sh
                 <strong>Pathway coordinates optimized via functional block swapping mechanics.</strong>
             </div>
 
-            <h2>5. ADMET 3.0 Pharmacokinetics Analysis</h2>
+            <h2>4. ADMET 3.0 Pharmacokinetics Analysis</h2>
             <p><strong>Automated IUPAC Nomenclature Generation:</strong></p>
             <div class="scandata" style="margin-bottom:20px; background:#e0f2fe; color:#0369a1; padding:10px; border-left: 4px solid #0284c7;">
                 {iupac}
@@ -998,13 +1011,13 @@ def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, sh
                 <img src="data:image/png;base64,{f_img}" style="max-width:100%; border-radius:6px; border: 1px solid #e2e8f0;"/>
             </div>
             
-            <h2>6. Master Synthesis Verdict</h2>
+            <h2>5. Master Synthesis Verdict</h2>
             <div class="verdict-card">
                 {master_verdict}
             </div>
             
             <div class="section" style="border-left: 6px solid #1565c0; background-color: #f4f8fd; padding:15px; margin-top:30px;">
-                <h2>7. Scientific Methodology & Manuscript Citation Track</h2>
+                <h2>6. Scientific Methodology & Manuscript Citation Track</h2>
                 <p><i>The following standard protocol text is generated dynamically to assist in manuscript development and formal peer-reviewed reporting:</i></p>
                 <blockquote style="background: #fff; padding: 12px; border-left: 4px solid #1565c0; font-style: italic; margin: 10px 0;">
                     Molecular docking was performed using the semi-empirical force field parameters of AutoDock Vina inside the InSilico BioSphere framework. To maintain structural and biological validity, essential catalytic cofactor ions were explicitly preserved within the target binding cleft during search configurations. Potential localized steric constraints and rigid atomic wall collisions resulting from structural constraints were resolved by subjecting the final protein-ligand complexes to post-docking energy minimization using the Universal Force Field (UFF) optimized to a convergence tolerance of 10<sup>-4</sup> kcal/mol·Å.
@@ -1153,7 +1166,7 @@ with col_params:
                         except: pass
                     
                     if not extracted_smiles:
-                        st.error("⚠️ RDKit could not deduce bond orders from the uploaded spatial coordinates. Phase 2 Generative Redesign requires a valid SMILES framework.")
+                        st.error("⚠️ RDKit could not deduce bond orders from the uploaded spatial coordinates.")
                         st.session_state.smiles_cache = ""
                     else:
                         st.session_state.smiles_cache = extracted_smiles 
@@ -1300,6 +1313,7 @@ with col_visual:
                     st.session_state.baseline_pre_uff = pre_uff
                     st.session_state.baseline_post_uff = post_uff
                     st.session_state.baseline_delta_uff = delta_uff
+                    st.session_state.baseline_affinity = pose_affinity_score
 
                 active_interactions = compute_spatial_interactions("protein.pdbqt", parsed_poses[selected_pose])
                 
@@ -1318,7 +1332,7 @@ with col_visual:
                 for cat_name, res_list in amino_acid_categories.items():
                     if res_list:
                         has_contacts = True
-                        labels_joined = ", ".join(list(set(res_list)))
+                        labels_joined = ", ".join(sorted(list(set(res_list))))
                         breakdown_html += f"<p style='margin:4px 0; font-size:13px;'><b>{cat_name}:</b> <span style='color:#333;'>{labels_joined}</span></p>"
                         report_breakdown_text += f"- {cat_name}: {labels_joined}\n"
                 if not has_contacts: 
@@ -1350,12 +1364,14 @@ with col_visual:
                 
                 col_render, col_mesh = st.columns([1, 1])
                 with col_render:
-                    style_mode = re.sub(r'\W+', '', st.radio("Macromolecule Style Mode:", ["Cartoon Ribbon Mesh", "Spacefill (VDW Configuration)", "Sticks Profile"], key="p1_style").split()[0].lower())
+                    style_choice_p1 = st.radio("Macromolecule Style Mode:", ["Cartoon Ribbon Mesh", "Spacefill", "Sticks Profile"], key="p1_style")
+                    style_mode_p1 = re.sub(r'\W+', '', style_choice_p1.split()[0].lower())
                 with col_mesh:
-                    surf_toggle = st.checkbox("Overlay Translucent Pocket Cavity Mesh", value=False, key="p1_surf")
+                    surf_toggle_p1 = st.checkbox("Overlay Translucent Pocket Cavity Mesh", value=False, key="p1_surf")
                     
-                render_advanced_modeling_blueprint(receptor_data=protein_data, ligand_data=parsed_poses[selected_pose], mode=style_mode, show_surface=surf_toggle, interactions_list=active_interactions, unique_id="p1_3d_result")
+                render_advanced_modeling_blueprint(receptor_data=protein_data, ligand_data=parsed_poses[selected_pose], mode=style_mode_p1, show_surface=surf_toggle_p1, interactions_list=active_interactions, unique_id="p1_3d_result")
                 
+                # --- EXPLICIT UFF EXPLANATION UI ---
                 st.write("---")
                 st.markdown("#### 📖 Understand UFF Minimization & Steric Clashes")
                 st.info(f"""
@@ -1366,6 +1382,7 @@ with col_visual:
                 This is the total stress of the complex *after* the Universal Force Field (UFF) algorithm ran its gradient descent optimization. The algorithm gently pushed overlapping atoms apart by fractions of an Angstrom until the bond lengths and angles reached a naturally permissible state. The negative force field delta (**{delta_uff} kcal/mol**) proves the rigid collision was successfully resolved!
                 """)
 
+                # --- PHASE 1 REPORT EXPORT ---
                 st.write("---")
                 st.subheader("📋 Phase 1: Local Contact Matrices & Report Generation")
 
@@ -1463,8 +1480,8 @@ Dr. Sarang S. Dhote, "InSilico BioSphere: An Integrated Platform for Automated M
                     meta=meta_data, p_2d=b_img, smiles_cache=st.session_state.smiles_cache, 
                     grid_params=grid_params, df_results=df_results_p1, orig_ints=active_interactions, 
                     receptor_data=protein_data, orig_ligand_pose_data=parsed_poses[selected_pose], 
-                    selected_pose_orig=selected_pose, style_mode=style_mode, 
-                    show_surface=surf_toggle, pre_uff=pre_uff, post_uff=post_uff, 
+                    selected_pose_orig=selected_pose, style_mode=style_mode_p1, 
+                    show_surface=surf_toggle_p1, pre_uff=pre_uff, post_uff=post_uff, 
                     delta_uff=delta_uff, active_retained_ions=st.session_state.active_retained_ions,
                     uff_theory_html=report_uff_theory_html, orig_matrix_html=orig_matrix_html,
                     grid_strategy=st.session_state.selected_native_ligand
@@ -1505,6 +1522,13 @@ if run_btn and can_dock:
             status_text.empty()
             st.session_state.docking_results_raw = "".join(output_log)
             st.session_state.uff_cache = {} 
+            
+            # Auto-extract Baseline Pose 1
+            try:
+                a_str = get_pose_affinity(st.session_state.docking_results_raw, 1)
+                if a_str != "N/A": st.session_state.baseline_affinity = float(a_str)
+            except: pass
+            
             time.sleep(0.8) 
             trigger_rerun = True
         else:
@@ -1518,7 +1542,9 @@ if st.session_state.docking_results_raw is not None:
     if not df_results.empty:
         col_table, col_export = st.columns([2, 1])
         with col_table: 
+            # Replaced complex styling with standard output for visibility in all themes
             st.dataframe(df_results, hide_index=True, use_container_width=True)
+            
         with col_export:
             csv_data = df_results.to_csv(index=False).encode('utf-8')
             st.download_button(label="📥 Download Data Sheet (.CSV)", data=csv_data, file_name="screening_affinity_report.csv", mime="text/csv", use_container_width=True)
@@ -1735,6 +1761,7 @@ else:
             try: st.session_state.redesign_baseline_affinity = float(new_aff_str)
             except: pass
 
+            # --- UFF MINIMIZATION ON PHASE 4 DERIVATIVE POSE ---
             cache_key_p4 = f"uff_p4_{st.session_state.selected_variant_id}_{p4_sel_pose}"
             uff_prog_p4 = st.empty()
             if cache_key_p4 not in st.session_state.uff_cache:
@@ -1753,13 +1780,21 @@ else:
             n_bonds = ", ".join(sorted(list(set([i["Interaction Type"] for i in new_ints])))) if new_ints else "None"
 
             with open("protein.pdbqt", "r") as f: p_data = f.read()
+            
             col_3d_1, col_3d_2 = st.columns(2)
             with col_3d_1:
                 st.markdown("#### Original Lead Complex")
-                render_advanced_modeling_blueprint(p_data, orig_pose, mode=st.session_state.style_mode, show_surface=st.session_state.surf_toggle, interactions_list=orig_ints, unique_id="p4_orig_viewer")
+                style_choice_p4_orig = st.radio("Style (Original):", ["Cartoon Ribbon Mesh", "Spacefill", "Sticks Profile"], key="p4_style_o")
+                style_mode_p4_orig = re.sub(r'\W+', '', style_choice_p4_orig.split()[0].lower())
+                surf_toggle_p4_orig = st.checkbox("Translucent Mesh", value=False, key="p4_surf_o")
+                render_advanced_modeling_blueprint(p_data, orig_pose, mode=style_mode_p4_orig, show_surface=surf_toggle_p4_orig, interactions_list=orig_ints, unique_id="p4_orig_viewer")
+                
             with col_3d_2:
                 st.markdown(f"#### Redesigned Derivative (Pose {p4_sel_pose})")
-                render_advanced_modeling_blueprint(p_data, p4_poses[p4_sel_pose], mode=st.session_state.style_mode, show_surface=st.session_state.surf_toggle, interactions_list=new_ints, unique_id="p4_new_viewer")
+                style_choice_p4_new = st.radio("Style (Derivative):", ["Cartoon Ribbon Mesh", "Spacefill", "Sticks Profile"], key="p4_style_n")
+                style_mode_p4_new = re.sub(r'\W+', '', style_choice_p4_new.split()[0].lower())
+                surf_toggle_p4_new = st.checkbox("Translucent Mesh", value=False, key="p4_surf_n")
+                render_advanced_modeling_blueprint(p_data, p4_poses[p4_sel_pose], mode=style_mode_p4_new, show_surface=surf_toggle_p4_new, interactions_list=new_ints, unique_id="p4_new_viewer")
             
             st.write("---")
             st.markdown("#### 📖 Understand UFF Minimization & Steric Clashes")
@@ -1773,7 +1808,6 @@ else:
 
             st.markdown("#### ⚖️ Direct Thermodynamic Comparison Matrix")
             
-            # Formating actual Phase 1 UFF value safely
             orig_delta = st.session_state.get('baseline_delta_uff', "N/A")
             if orig_delta != "N/A": orig_delta = f"{orig_delta} kcal/mol"
             
@@ -1921,7 +1955,7 @@ Dr. Sarang S. Dhote, "InSilico BioSphere: An Integrated Platform for Automated M
                 baseline_affinity=st.session_state.baseline_affinity, grid_params=grid_params, df_results=df_results, 
                 orig_ints=orig_ints, new_ints=new_ints, receptor_data=receptor_data, orig_ligand_pose_data=orig_pose, 
                 redesign_ligand_pose_data=p4_poses[p4_sel_pose], selected_pose_orig=st.session_state.get('selected_pose_export', 1), 
-                selected_pose_new=p4_sel_pose, style_mode=st.session_state.style_mode, show_surface=st.session_state.surf_toggle,
+                selected_pose_new=p4_sel_pose, style_mode=style_mode_p4_new, show_surface=surf_toggle_p4_new,
                 master_verdict=master_verdict, df_comparison_html=df_comparison_html, pre_uff=pre_uff, post_uff=post_uff, delta_uff=delta_uff,
                 active_retained_ions=st.session_state.active_retained_ions, uff_theory_html=report_uff_theory_html,
                 orig_matrix_html=orig_matrix_html, new_matrix_html=new_matrix_html, grid_strategy=st.session_state.selected_native_ligand
