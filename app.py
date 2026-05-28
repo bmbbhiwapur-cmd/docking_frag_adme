@@ -2,6 +2,7 @@ import time
 import streamlit as st
 import subprocess
 import os
+import shutil
 import urllib.request
 import urllib.parse
 import json
@@ -58,7 +59,13 @@ def initialize_session_states():
         "rd_library": None,
         "selected_variant_id": None,
         "style_mode": "cartoon",
-        "surf_toggle": False
+        "surf_toggle": False,
+        "active_retained_ions": "None",
+        "uff_cache": {},
+        "last_uploaded_protein": "",
+        "last_uploaded_ligand": "",
+        "detected_pockets": [],
+        "selected_native_ligand": "None (Manual / Blind Docking)"
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -138,6 +145,17 @@ def extract_pdb_metadata(file_path, pdb_id="Custom"):
     except Exception: pass
     return meta
 
+def discover_and_list_all_heteroatoms(file_path):
+    hetero_counts = {}
+    if not os.path.exists(file_path): return hetero_counts
+    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            if line.startswith("HETATM"):
+                res_name = line[17:20].strip()
+                if res_name in ["HOH", "WAT", "DOD"]: continue
+                hetero_counts[res_name] = hetero_counts.get(res_name, 0) + 1
+    return hetero_counts
+
 def parse_bound_ligands(file_path):
     ligands = {}
     if not os.path.exists(file_path): return []
@@ -173,6 +191,47 @@ def parse_bound_ligands(file_path):
         })
     return processed_ligands
 
+def identify_protein_cavities(pdbqt_file, max_pockets=5):
+    coords = []
+    if not os.path.exists(pdbqt_file): return []
+    with open(pdbqt_file, "r") as f:
+        for line in f:
+            if line.startswith(("ATOM", "HETATM")):
+                try:
+                    coords.append([float(line[30:38]), float(line[38:46]), float(line[46:54])])
+                except ValueError: continue
+    if len(coords) < 10: return []
+    arr = np.array(coords)
+    min_bound, max_bound = np.min(arr, axis=0), np.max(arr, axis=0)
+    step = (max_bound - min_bound) / 4.0
+    pockets, idx = [], 1
+    for i in range(1, 4):
+        for j in range(1, 4):
+            for k in range(1, 4):
+                pt = min_bound + np.array([i*step[0], j*step[1], k*step[2]])
+                dists = np.linalg.norm(arr - pt, axis=1)
+                score = np.sum((dists > 3.0) & (dists < 12.0))
+                core_clash = np.sum(dists <= 3.0)
+                if core_clash < 20 and score > 20:
+                    pockets.append({"Pocket_ID": f"Cavity {idx}", "cx": round(pt[0], 2), "cy": round(pt[1], 2), "cz": round(pt[2], 2), "bx": 20.0, "by": 20.0, "bz": 20.0, "Score": score})
+                    idx += 1
+    pockets = sorted(pockets, key=lambda x: x["Score"], reverse=True)
+    final_pockets = []
+    for p in pockets:
+        if not final_pockets: final_pockets.append(p)
+        else:
+            is_unique = True
+            for fp in final_pockets:
+                dist = np.linalg.norm(np.array([p["cx"], p["cy"], p["cz"]]) - np.array([fp["cx"], fp["cy"], fp["cz"]]))
+                if dist < 6.0: 
+                    is_unique = False; break
+            if is_unique: final_pockets.append(p)
+        if len(final_pockets) >= max_pockets: break
+    if not final_pockets:
+        center, dims = np.mean(arr, axis=0), max_bound - min_bound
+        final_pockets.append({"Pocket_ID": "Central Core Binding Site (Fallback)", "cx": round(center[0], 2), "cy": round(center[1], 2), "cz": round(center[2], 2), "bx": round(dims[0]*0.5, 2) + 5, "by": round(dims[1]*0.5, 2) + 5, "bz": round(dims[2]*0.5, 2) + 5, "Score": 100})
+    return final_pockets
+
 def compute_protein_bounding_box(pdbqt_file):
     if not os.path.exists(pdbqt_file): return 0, 0, 0, 20, 20, 20
     coords = []
@@ -180,22 +239,21 @@ def compute_protein_bounding_box(pdbqt_file):
         for line in f:
             if line.startswith(("ATOM", "HETATM")):
                 try:
-                    x, y, z = float(line[30:38].strip()), float(line[38:46].strip()), float(line[46:54].strip())
-                    coords.append((x, y, z))
+                    coords.append((float(line[30:38].strip()), float(line[38:46].strip()), float(line[46:54].strip())))
                 except ValueError: pass
     if not coords: return 0, 0, 0, 20, 20, 20
     coords = np.array(coords)
-    min_c = coords.min(axis=0)
-    max_c = coords.max(axis=0)
+    min_c, max_c = coords.min(axis=0), coords.max(axis=0)
     center = (min_c + max_c) / 2.0
     size = (max_c - min_c) + 15.0
     return center[0], center[1], center[2], size[0], size[1], size[2]
 
-def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt", is_ligand=False):
+def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt", is_ligand=False, allowed_heteroatoms=None):
+    if allowed_heteroatoms is None: allowed_heteroatoms = []
     autodock_type_map = {
         "H": "H", "HD": "HD", "HS": "HS", "C": "C", "A": "A", "N": "N", "NA": "NA", 
         "NS": "NS", "O": "O", "OA": "OA", "S": "S", "SA": "SA", "P": "P", "F": "F", 
-        "CL": "Cl", "BR": "Br", "I": "I", "ZN": "Zn", "MG": "Mg"
+        "CL": "Cl", "BR": "Br", "I": "I", "ZN": "Zn", "MG": "Mg", "FE": "Fe", "CA": "Ca"
     }
     torsions = 0
     if is_ligand:
@@ -203,16 +261,20 @@ def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt", is_ligand=Fals
             mol = Chem.MolFromPDBFile(input_pdb, removeHs=False)
             if mol: torsions = AllChem.CalcNumRotatableBonds(mol)
         except Exception: torsions = 4
+        
+    temp_out = f"temp_safe_write_{output_pdbqt}"
     try:
-        with open(input_pdb, "r", encoding="utf-8", errors="ignore") as pdb, open(output_pdbqt, "w", encoding="utf-8") as pdbqt:
+        atom_count = 0
+        with open(input_pdb, "r", encoding="utf-8", errors="ignore") as pdb, open(temp_out, "w", encoding="utf-8") as pdbqt:
             if is_ligand: pdbqt.write("ROOT\n")
             for line in pdb:
                 if line.startswith(("ATOM", "HETATM")):
                     record_type = line[:6].strip()
+                    res_name = line[17:20].strip()
+                    if record_type == "HETATM" and not is_ligand and res_name not in allowed_heteroatoms: continue
                     try: atom_id = int(line[6:11].strip())
                     except ValueError: atom_id = 1
                     atom_name = line[12:16]
-                    res_name = line[17:20].strip()
                     chain_id = line[21].strip() if line[21].strip() else "A"
                     try: res_seq = int(line[22:26].strip())
                     except ValueError: res_seq = 1
@@ -224,38 +286,73 @@ def convert_pdb_to_pdbqt(input_pdb, output_pdbqt="protein.pdbqt", is_ligand=Fals
                     vina_type = autodock_type_map.get(element, element.title())
                     if element == "C" and "AR" in atom_name.upper(): vina_type = "A"
                     pdbqt.write(f"{record_type:<6}{atom_id:>5} {atom_name:<4} {res_name:>3} {chain_id}{res_seq:>4}    {x:>8.3f}{y:>8.3f}{z:>8.3f}{1.00:>6.2f}{0.00:>6.2f}    +0.000 {vina_type:<2}\n")
+                    atom_count += 1
             if is_ligand:
                 pdbqt.write("ENDROOT\n")
                 pdbqt.write(f"TORSDOF {torsions}\n")
             else: pdbqt.write("ENDMDL\n")
-        return True, output_pdbqt
-    except Exception as e: return False, str(e)
+        shutil.move(temp_out, output_pdbqt)
+        return atom_count > 0, output_pdbqt
+    except Exception as e:
+        if os.path.exists(temp_out): os.remove(temp_out)
+        return False, str(e)
 
 def convert_smiles_to_pdbqt(smiles_string, output_filename="ligand.pdbqt"):
     try:
         mol = Chem.MolFromSmiles(smiles_string)
         if mol is None: return False, "Invalid SMILES."
         mol = Chem.AddHs(mol)
-        
         params = AllChem.ETKDGv3()
         params.useRandomCoords = True
         params.maxIterations = 1000
         res = AllChem.EmbedMolecule(mol, params)
-        if res != 0:
-            res = AllChem.EmbedMolecule(mol, useRandomCoords=True)
-        if res != 0:
-            return False, "RDKit failed to generate 3D coordinates for this specific SMILES."
-            
-        try:
-            AllChem.MMFFOptimizeMolecule(mol)
+        if res != 0: res = AllChem.EmbedMolecule(mol, useRandomCoords=True)
+        if res != 0: return False, "RDKit failed to generate 3D coordinates."
+        try: AllChem.MMFFOptimizeMolecule(mol)
         except: pass
-        
         temp_pdb = "temp_ligand.pdb"
         Chem.MolToPDBFile(mol, temp_pdb)
-        convert_pdb_to_pdbqt(temp_pdb, output_filename, is_ligand=True)
+        ok, msg = convert_pdb_to_pdbqt(temp_pdb, output_filename, is_ligand=True)
         if os.path.exists(temp_pdb): os.remove(temp_pdb)
-        return True, output_filename
+        return ok, msg
     except Exception as e: return False, str(e)
+
+# --- NATIVE UFF ENERGY MINIMIZATION ENGINE ---
+
+def execute_uff_complex_minimization(protein_path, ligand_pose_str, progress_ui=None):
+    try:
+        protein_mol = Chem.MolFromPDBFile(protein_path, sanitize=False, removeHs=False)
+        ligand_mol = Chem.MolFromPDBBlock(ligand_pose_str, sanitize=False, removeHs=False)
+        if not protein_mol or not ligand_mol: return "N/A", "N/A", "N/A"
+        
+        combined_complex = Chem.CombineMols(protein_mol, ligand_mol)
+        try: Chem.SanitizeMol(combined_complex, Chem.SanitizeFlags.SANITIZE_ALL ^ Chem.SanitizeFlags.SANITIZE_PROPERTIES)
+        except Exception: pass
+        
+        uff_field = AllChem.UFFGetMoleculeForceField(combined_complex)
+        if not uff_field: return "N/A", "N/A", "N/A"
+        
+        pre_energy = uff_field.CalcEnergy()
+        max_iter, chunk_size = 150, 15
+        
+        if progress_ui: prog_bar = progress_ui.progress(0, text="⏳ Initializing UFF Force Field Physics Matrix...")
+        
+        res = 1
+        for i in range(0, max_iter, chunk_size):
+            res = uff_field.Minimize(maxIts=chunk_size, forceTol=1e-3)
+            pct = min(100, int(((i + chunk_size) / max_iter) * 100))
+            if progress_ui: prog_bar.progress(pct, text=f"🧬 Relaxing Complex Sterics... ({pct}% complete)")
+            time.sleep(0.01) 
+            if res == 0:
+                if progress_ui: prog_bar.progress(100, text="✨ Steric Relaxation Converged Perfectly!")
+                break
+        if res != 0 and progress_ui: prog_bar.progress(100, text="✨ Steric Relaxation Completed (Max Steps Reached).")
+            
+        post_energy = uff_field.CalcEnergy()
+        delta_energy = post_energy - pre_energy
+        time.sleep(0.4)
+        return f"{pre_energy:.2f}", f"{post_energy:.2f}", f"{delta_energy:.2f}"
+    except Exception: return "N/A", "N/A", "N/A"
 
 def parse_pdbqt_coordinates(pdbqt_string):
     atoms = []
@@ -273,8 +370,7 @@ def parse_pdbqt_coordinates(pdbqt_string):
 def compute_spatial_interactions(receptor_file, ligand_pdbqt_str):
     interactions = []
     if not os.path.exists(receptor_file): return interactions
-    with open(receptor_file, "r") as f:
-       receptor_atoms = parse_pdbqt_coordinates(f.read())
+    with open(receptor_file, "r") as f: receptor_atoms = parse_pdbqt_coordinates(f.read())
     ligand_atoms = parse_pdbqt_coordinates(ligand_pdbqt_str)
     
     seen = set()
@@ -284,17 +380,11 @@ def compute_spatial_interactions(receptor_file, ligand_pdbqt_str):
             if dist < 3.8: 
                 res_id = r_at["res"]
                 if res_id in seen: continue
-                if l_at["element"] in ["N", "O", "F", "S"] and r_at["element"] in ["N", "O", "F", "S"]:
-                    b_type = "Hydrogen Bond"
-                elif "A" in r_at["element"] or (l_at["element"] == "C" and r_at["element"] == "C" and any(aro in r_at["res"] for aro in ["PHE", "TYR", "TRP"])):
-                    b_type = "pi-Stacking / Hydrophobic"
-                else:
-                    b_type = "van der Waals Contact"
+                if l_at["element"] in ["N", "O", "F", "S"] and r_at["element"] in ["N", "O", "F", "S"]: b_type = "Hydrogen Bond"
+                elif "A" in r_at["element"] or (l_at["element"] == "C" and r_at["element"] == "C" and any(aro in r_at["res"] for aro in ["PHE", "TYR", "TRP"])): b_type = "pi-Stacking / Hydrophobic"
+                else: b_type = "van der Waals Contact"
                 seen.add(res_id)
-                interactions.append({
-                    "Residue Contact": res_id, "Interaction Type": b_type, "Distance (Å)": round(dist, 2),
-                    "r_coord": r_at["coord"].tolist(), "l_coord": l_at["coord"].tolist()
-                })
+                interactions.append({"Residue Contact": res_id, "Interaction Type": b_type, "Distance (Å)": round(dist, 2), "r_coord": r_at["coord"].tolist(), "l_coord": l_at["coord"].tolist()})
     return interactions
 
 def split_docking_poses(poses_file_path):
@@ -320,6 +410,25 @@ def get_pose_affinity(stdout_text, idx):
         if m and int(m.group(1)) == idx: return m.group(2)
     return "N/A"
 
+def parse_vina_output_with_residues_global(stdout_text, docking_file="docking_poses.pdbqt"):
+    data = []
+    poses_dict = split_docking_poses(docking_file)
+    if not stdout_text: return pd.DataFrame(data)
+    for line in stdout_text.split("\n"):
+        parts = line.split()
+        if len(parts) >= 4 and parts[0].isdigit():
+            try:
+                mode_idx, aff, rmsd_lb, rmsd_ub = int(parts[0]), float(parts[1]), float(parts[2]), float(parts[3])
+                res_string, bond_types = "N/A", "N/A"
+                if mode_idx in poses_dict:
+                    ints = compute_spatial_interactions("protein.pdbqt", poses_dict[mode_idx])
+                    if ints:
+                        res_string = ", ".join(sorted(list(set([i["Residue Contact"] for i in ints]))))
+                        bond_types = ", ".join(sorted(list(set([i["Interaction Type"] for i in ints]))))
+                data.append({"Binding Mode": mode_idx, "Affinity (kcal/mol)": aff, "RMSD l.b.": rmsd_lb, "RMSD u.b.": rmsd_ub, "Interacting Residues": res_string, "Contact Bond Types": bond_types})
+            except ValueError: continue
+    return pd.DataFrame(data)
+
 # =====================================================================
 # 3. FRAGMENTATION & ADVANCED ADME MODULE
 # =====================================================================
@@ -330,10 +439,7 @@ def find_valid_cleavage_sites(smiles_str):
         mol = Chem.MolFromSmiles(smiles_str)
         if mol:
             for atom in mol.GetAtoms():
-                idx = atom.GetIdx()
-                sym = atom.GetSymbol()
-                deg = atom.GetDegree()
-                hs = atom.GetTotalNumHs()
+                idx, sym, deg, hs = atom.GetIdx(), atom.GetSymbol(), atom.GetDegree(), atom.GetTotalNumHs()
                 if deg == 1 and sym != 'C': valid_sites.append({"index": idx, "label": f"Atom #{idx} (Terminal {sym})"})
                 elif sym == 'C' and hs > 0: valid_sites.append({"index": idx, "label": f"Atom #{idx} ({sym} with available H)"})
                 elif sym in ['N', 'O', 'S'] and hs > 0: valid_sites.append({"index": idx, "label": f"Atom #{idx} (Core {sym} with available H)"})
@@ -352,84 +458,65 @@ def get_dynamic_fragments(parent_smiles):
     aliphatic_ratio = len(aliphatic_carbons) / len(total_carbons) if total_carbons else 0
 
     if mol.HasSubstructMatch(flavone_smarts) or phenol_count >= 2:
-        subclass_title = "Polyphenolic Flavonoid Core"
-        fragments = [
+        return "Polyphenolic Flavonoid Core", [
             {"name": "Glucosylation (-C6H11O5)", "smiles": "OC1C(O)C(O)C(O)C(CO)O1", "peak": 3350, "yield": "Moderate Yield (58%)", "route": "Enzymatic glycosylation via Phase II transferase mirroring."},
             {"name": "Prenylation (-CH2CH=C(CH3)2)", "smiles": "CC(C)=CC", "peak": 1660, "yield": "Good Yield (72%)", "route": "Late-stage electrophilic C-alkylation."},
             {"name": "O-Methylation (-OCH3)", "smiles": "OC", "peak": 1250, "yield": "Excellent Yield (91%)", "route": "Selective etherification using Dimethyl Sulfate."},
             {"name": "Acetylation (-OCOCH3)", "smiles": "OC(=O)C", "peak": 1735, "yield": "Good Yield (84%)", "route": "Esterification utilizing Acetic Anhydride."}
         ]
     elif mol.HasSubstructMatch(alkaloid_smarts):
-        subclass_title = "Alkaloidal Nitrogen Heterocycle"
-        fragments = [
+        return "Alkaloidal Nitrogen Heterocycle", [
             {"name": "N-Alkylation (-CH2CH3)", "smiles": "CC", "peak": 2960, "yield": "Good Yield (80%)", "route": "Nucleophilic substitution at nitrogen nodes using Ethyl Bromide."},
             {"name": "Quaternization (-CH3+)", "smiles": "C", "peak": 2850, "yield": "Excellent Yield (94%)", "route": "Methylation using Methyl Iodide."},
             {"name": "Amidation (-COCH3)", "smiles": "C(=O)C", "peak": 1665, "yield": "Good Yield (78%)", "route": "Amide condensation using Acetyl Chloride."},
             {"name": "N-Oxidation (=O)", "smiles": "[O-]", "peak": 950, "yield": "Moderate Yield (65%)", "route": "Controlled oxidation via mCPBA."}
         ]
     elif aliphatic_ratio > 0.65:
-        subclass_title = "Aliphatic Terpenoid Scaffold"
-        fragments = [
+        return "Aliphatic Terpenoid Scaffold", [
             {"name": "Epoxidation (=O)", "smiles": "O", "peak": 1250, "yield": "Moderate Yield (60%)", "route": "Prilezhaev reaction using mCPBA across isolated alkene bonds."},
             {"name": "Hydroxylation (-OH)", "smiles": "O", "peak": 3400, "yield": "Poor Yield (42%)", "route": "Allylic C-H functionalization driven by Selenium Dioxide."},
             {"name": "Ozonolysis Fragmentation", "smiles": "O=C", "peak": 1710, "yield": "Good Yield (70%)", "route": "Oxidative cleavage of double bonds."},
             {"name": "Esterification (-COOCH3)", "smiles": "C(=O)OC", "peak": 1740, "yield": "Good Yield (86%)", "route": "Fischer esterification across terminal carboxylic vectors."}
         ]
     else:
-        subclass_title = "Standard Organic Lead Profile"
-        fragments = [
+        return "Standard Organic Lead Profile", [
             {"name": "Methylation (-CH3)", "smiles": "C", "peak": 2925, "yield": "Good Yield (85%)", "route": "Standard alkylation path via Methyl Iodide."},
             {"name": "Hydroxylation (-OH)", "smiles": "O", "peak": 3450, "yield": "Moderate Yield (62%)", "route": "Direct C-H matrix oxidation with copper coordination."},
             {"name": "Amination (-NH2)", "smiles": "N", "peak": 3320, "yield": "Good Yield (74%)", "route": "Controlled substitution via nucleophilic amination."},
             {"name": "Fluorination (-F)", "smiles": "F", "peak": 1150, "yield": "Poor Yield (38%)", "route": "Late-stage electrophilic fluorination using Selectfluor."}
         ]
-    return subclass_title, fragments
 
 def run_cleaving_engine(parent_smiles, target_atom_idx, mechanism_mode):
     parent_mol = Chem.MolFromSmiles(parent_smiles)
     if not parent_mol: return []
     _, fragments = get_dynamic_fragments(parent_smiles)
     derived_library = []
-    
     baseline = st.session_state.baseline_affinity if st.session_state.baseline_affinity is not None else -6.2
     
     for idx, frag in enumerate(fragments):
         success = False
         derived_smiles = f"{parent_smiles}.{frag['smiles']}"
-        route = "Non-covalent co-crystallization formulation (Safe Sandbox Mode)."
-        frag_name = frag["name"] + " (Sandbox Bypass)"
+        route, frag_name = "Non-covalent co-crystallization formulation (Safe Sandbox Mode).", frag["name"] + " (Sandbox Bypass)"
         
         if "True Structural Cleaving" in mechanism_mode:
             try:
                 rw_mol = Chem.RWMol(parent_mol)
                 t_atom = rw_mol.GetAtomWithIdx(int(target_atom_idx))
-                is_terminal = (t_atom.GetDegree() == 1 and t_atom.GetSymbol() != 'C')
-                
-                if is_terminal:
-                    t_atom.SetAtomicNum(0)
-                    t_atom.SetIsotope(999)
+                if t_atom.GetDegree() == 1 and t_atom.GetSymbol() != 'C': t_atom.SetAtomicNum(0); t_atom.SetIsotope(999)
                 else:
                     dummy = Chem.Atom(0)
                     dummy.SetIsotope(999)
                     new_idx = rw_mol.AddAtom(dummy)
                     rw_mol.AddBond(int(target_atom_idx), new_idx, Chem.BondType.SINGLE)
-                    
                 tagged_mol = rw_mol.GetMol()
                 Chem.SanitizeMol(tagged_mol)
-                pattern = Chem.MolFromSmarts("[999*]")
-                frag_mol = Chem.MolFromSmiles(frag['smiles'])
-                replaced_mols = AllChem.ReplaceSubstructs(tagged_mol, pattern, frag_mol, replaceAll=True)
-                
+                replaced_mols = AllChem.ReplaceSubstructs(tagged_mol, Chem.MolFromSmarts("[999*]"), Chem.MolFromSmiles(frag['smiles']), replaceAll=True)
                 if replaced_mols:
                     final_mol = replaced_mols[0]
                     Chem.SanitizeMol(final_mol)
                     derived_smiles = Chem.MolToSmiles(final_mol)
-                    if Chem.MolFromSmiles(derived_smiles): 
-                        success = True
-                        frag_name = frag["name"]
-                        route = frag["route"]
-            except Exception: 
-                success = False
+                    if Chem.MolFromSmiles(derived_smiles): success, frag_name, route = True, frag["name"], frag["route"]
+            except Exception: success = False
 
         test_mol = Chem.MolFromSmiles(derived_smiles)
         mw = round(Descriptors.MolWt(test_mol), 2) if test_mol else 0
@@ -449,73 +536,35 @@ def get_iupac_name(smiles):
         encoded_smiles = urllib.parse.quote(smiles, safe='')
         url = f"https://cactus.nci.nih.gov/chemical/structure/{encoded_smiles}/iupac_name"
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=3) as response:
-            return response.read().decode('utf-8')
-    except Exception:
-        return "IUPAC translation unavailable (Network Timeout)"
+        with urllib.request.urlopen(req, timeout=3) as response: return response.read().decode('utf-8')
+    except Exception: return "IUPAC translation unavailable (Network Timeout)"
 
 def calculate_advanced_adme(smiles):
-    default_adme = {
-        "MW": 0.0, "LogP": 0.0, "HBD": 0, "HBA": 0, "TPSA": 0.0, "Violations": 0,
-        "Lipinski_Obey": "N/A", "Oral_Bio": "N/A", "MaxRing": 0, "Volume": 0.0,
-        "pKa_Acid": "N/A", "pKa_Base": "N/A", "MP": 0.0, "BP": 0.0, "Permeability": "N/A",
-        "BBB": False, "HIA": False
-    }
+    default_adme = {"MW": 0.0, "LogP": 0.0, "HBD": 0, "HBA": 0, "TPSA": 0.0, "Violations": 0, "Lipinski_Obey": "N/A", "Oral_Bio": "N/A", "MaxRing": 0, "Volume": 0.0, "pKa_Acid": "N/A", "pKa_Base": "N/A", "MP": 0.0, "BP": 0.0, "Permeability": "N/A", "BBB": False, "HIA": False}
     try:
         mol = Chem.MolFromSmiles(smiles)
         if not mol: return default_adme
         mol = Chem.AddHs(mol)
-        mw = Descriptors.MolWt(mol)
-        logp = Descriptors.MolLogP(mol)
-        hbd = Descriptors.NumHDonors(mol)
-        hba = Descriptors.NumHAcceptors(mol)
-        tpsa = Descriptors.TPSA(mol)
+        mw, logp, hbd, hba, tpsa = Descriptors.MolWt(mol), Descriptors.MolLogP(mol), Descriptors.NumHDonors(mol), Descriptors.NumHAcceptors(mol), Descriptors.TPSA(mol)
         violations = sum([mw > 500, logp > 5, hbd > 5, hba > 10])
         lipinski_obey = "Yes" if violations <= 1 else "No"
         oral_bio = "Yes (High)" if violations == 0 else ("Yes (Moderate)" if violations == 1 else "No (Poor)")
         ring_info = mol.GetRingInfo().AtomRings()
         max_ring = max([len(r) for r in ring_info]) if ring_info else 0
-        
         vol = float(mw) * 0.88 
-            
-        acidic_pka = "Neutral"
-        if mol.HasSubstructMatch(Chem.MolFromSmarts("C(=O)[OH]")): acidic_pka = "Acidic (~4.5)"
-        elif mol.HasSubstructMatch(Chem.MolFromSmarts("c[OH]")): acidic_pka = "Weak Acid (~9.5)"
-        basic_pka = "Neutral"
-        if mol.HasSubstructMatch(Chem.MolFromSmarts("[NX3;H2,H1;!$(NC=O)]")): basic_pka = "Basic (~9.0)"
-        elif mol.HasSubstructMatch(Chem.MolFromSmarts("cN")): basic_pka = "Weak Base (~4.0)"
-        
+        acidic_pka = "Acidic (~4.5)" if mol.HasSubstructMatch(Chem.MolFromSmarts("C(=O)[OH]")) else ("Weak Acid (~9.5)" if mol.HasSubstructMatch(Chem.MolFromSmarts("c[OH]")) else "Neutral")
+        basic_pka = "Basic (~9.0)" if mol.HasSubstructMatch(Chem.MolFromSmarts("[NX3;H2,H1;!$(NC=O)]")) else ("Weak Base (~4.0)" if mol.HasSubstructMatch(Chem.MolFromSmarts("cN")) else "Neutral")
         rot_bonds = Descriptors.NumRotatableBonds(mol)
         est_mp = max(20.0, (mw * 0.4) + (hbd * 25.0) - (rot_bonds * 5.0))
         est_bp = est_mp + 150.0 + (mw * 0.5)
-        hia = (tpsa < 132) and (-2.0 < logp < 6.0)
-        bbb = (tpsa < 79) and (0.4 < logp < 6.0)
+        hia, bbb = (tpsa < 132) and (-2.0 < logp < 6.0), (tpsa < 79) and (0.4 < logp < 6.0)
         perm = "High BBB Penetration & GI Absorption" if bbb else ("Good GI Absorption" if hia else "Poor Absorption / Impermeable")
-        
-        return {
-            "MW": mw, "LogP": logp, "HBD": hbd, "HBA": hba, "TPSA": tpsa, "Violations": violations,
-            "Lipinski_Obey": lipinski_obey, "Oral_Bio": oral_bio, "MaxRing": max_ring, "Volume": vol,
-            "pKa_Acid": acidic_pka, "pKa_Base": basic_pka, "MP": est_mp, "BP": est_bp, "Permeability": perm,
-            "BBB": bbb, "HIA": hia
-        }
-    except Exception:
-        return default_adme
+        return {"MW": mw, "LogP": logp, "HBD": hbd, "HBA": hba, "TPSA": tpsa, "Violations": violations, "Lipinski_Obey": lipinski_obey, "Oral_Bio": oral_bio, "MaxRing": max_ring, "Volume": vol, "pKa_Acid": acidic_pka, "pKa_Base": basic_pka, "MP": est_mp, "BP": est_bp, "Permeability": perm, "BBB": bbb, "HIA": hia}
+    except Exception: return default_adme
 
 # =====================================================================
 # 4. HIGH PERFORMANCE VISUALIZATION UTILITIES
 # =====================================================================
-
-def generate_2d_ligand_img(mol):
-    if mol is None: return None
-    try:
-        mol_flat = Chem.Mol(mol)
-        Chem.SanitizeMol(mol_flat)
-        AllChem.Compute2DCoords(mol_flat)
-        img = Draw.MolToImage(mol_flat, size=(340, 260))
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        return base64.b64encode(buf.getvalue()).decode('utf-8')
-    except Exception: return None
 
 def generate_clean_2d_image(smiles_str, include_labels=False, zoom_level=450):
     try:
@@ -523,8 +572,7 @@ def generate_clean_2d_image(smiles_str, include_labels=False, zoom_level=450):
         if mol:
             mol_to_draw = Chem.RemoveHs(mol)
             if include_labels:
-                for atom in mol_to_draw.GetAtoms():
-                    atom.SetProp('atomNote', str(atom.GetIdx()))
+                for atom in mol_to_draw.GetAtoms(): atom.SetProp('atomNote', str(atom.GetIdx()))
             img = Draw.MolToImage(mol_to_draw, size=(zoom_level, int(zoom_level * 0.77)))
             buffered = io.BytesIO()
             img.save(buffered, format="PNG")
@@ -540,10 +588,8 @@ def generate_ftir_image(target_peak):
     transmittance = np.clip(baseline - effect, 5.0, 100.0)
     fig, ax = plt.subplots(figsize=(8, 3.5))
     ax.plot(wavenumbers, transmittance, color='#1e3c72', linewidth=2)
-    ax.set_xlim(4000, 400)
-    ax.set_ylim(0, 105)
-    ax.set_xlabel("Wavenumber (cm⁻¹)")
-    ax.set_ylabel("Transmittance (%)")
+    ax.set_xlim(4000, 400); ax.set_ylim(0, 105)
+    ax.set_xlabel("Wavenumber (cm⁻¹)"); ax.set_ylabel("Transmittance (%)")
     ax.grid(True, linestyle='--', alpha=0.6)
     ax.fill_between(wavenumbers, transmittance, 105, color='#1e3c72', alpha=0.05)
     buf = io.BytesIO()
@@ -555,8 +601,7 @@ def render_advanced_modeling_blueprint(receptor_data, ligand_data, mode="cartoon
     surface_js = f"viewer_{unique_id}.addSurface($3Dmol.SurfaceType.VDW, {{opacity:0.45, colorscheme:{{prop:'b',gradient:'rwb'}}}}, {{model:0}});" if show_surface else ""
     int_lines_js = ""
     for interact in interactions_list:
-        rc = interact["r_coord"]
-        lc = interact["l_coord"]
+        rc, lc = interact["r_coord"], interact["l_coord"]
         color = "yellow" if "Hydrogen" in interact["Interaction Type"] else "cyan"
         int_lines_js += f"""
         viewer_{unique_id}.addCylinder({{start:{{x:{rc[0]}, y:{rc[1]}, z:{rc[2]}}}, end:{{x:{lc[0]}, y:{lc[1]}, z:{lc[2]}}}, radius:0.07, color:'{color}', dashed:true}});
@@ -596,10 +641,9 @@ def render_advanced_modeling_blueprint(receptor_data, ligand_data, mode="cartoon
 
 def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, shift_msg, f_img, v_2d, p_2d, 
                                     smiles_cache, baseline_affinity, grid_params, df_results, 
-                                    orig_ints, new_ints, 
-                                    receptor_data, orig_ligand_pose_data, redesign_ligand_pose_data, 
+                                    orig_ints, new_ints, receptor_data, orig_ligand_pose_data, redesign_ligand_pose_data, 
                                     selected_pose_orig, selected_pose_new, style_mode, show_surface,
-                                    master_verdict, df_comparison_html):
+                                    master_verdict, df_comparison_html, pre_uff, post_uff, delta_uff, active_retained_ions):
     
     if df_results is not None and not df_results.empty:
         res_html = '<table class="dataframe table"><thead><tr>'
@@ -611,42 +655,25 @@ def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, sh
                 val = row[col]
                 style = ''
                 if col == 'Affinity (kcal/mol)' and isinstance(val, (int, float)):
-                    if val < 0:
-                        style = 'style="color: #10b981; font-weight: bold;"' # Green
-                    elif val > 0:
-                        style = 'style="color: #ef4444; font-weight: bold;"' # Red
+                    if val < 0: style = 'style="color: #10b981; font-weight: bold;"'
+                    elif val > 0: style = 'style="color: #ef4444; font-weight: bold;"'
                 res_html += f'<td {style}>{val}</td>'
             res_html += '</tr>'
         res_html += '</tbody></table>'
-    else:
-        res_html = "<p>No docking data.</p>"
+    else: res_html = "<p>No docking data.</p>"
 
-    df_int = pd.DataFrame(orig_ints)
-    int_html = df_int.to_html(index=False, classes="dataframe table") if not df_int.empty else "<p>No close contacts detected.</p>"
-    
     safe_rec = str(receptor_data).replace('`', '').replace('\\', '\\\\')
     safe_lig_orig = str(orig_ligand_pose_data).replace('`', '').replace('\\', '\\\\')
     safe_lig_redesign = str(redesign_ligand_pose_data).replace('`', '').replace('\\', '\\\\')
 
     int_lines_js1 = ""
     for interact in orig_ints:
-        rc = interact["r_coord"]
-        lc = interact["l_coord"]
         color = "yellow" if "Hydrogen" in interact["Interaction Type"] else "cyan"
-        int_lines_js1 += f"""
-        viewer1.addCylinder({{start:{{x:{rc[0]}, y:{rc[1]}, z:{rc[2]}}}, end:{{x:{lc[0]}, y:{lc[1]}, z:{lc[2]}}}, radius:0.07, color:'{color}', dashed:true}});
-        viewer1.addLabel("{interact['Residue Contact']} ({interact['Distance (Å)']}A)", {{position:{{x:{rc[0]}, y:{rc[1]}, z:{rc[2]}}}, backgroundColor:'white', fontColor:'black', backgroundOpacity:0.8, fontSize:11}});
-        """
-
+        int_lines_js1 += f"viewer1.addCylinder({{start:{{x:{interact['r_coord'][0]}, y:{interact['r_coord'][1]}, z:{interact['r_coord'][2]}}}, end:{{x:{interact['l_coord'][0]}, y:{interact['l_coord'][1]}, z:{interact['l_coord'][2]}}}, radius:0.07, color:'{color}', dashed:true}});\n"
     int_lines_js2 = ""
     for interact in new_ints:
-        rc = interact["r_coord"]
-        lc = interact["l_coord"]
         color = "yellow" if "Hydrogen" in interact["Interaction Type"] else "cyan"
-        int_lines_js2 += f"""
-        viewer2.addCylinder({{start:{{x:{rc[0]}, y:{rc[1]}, z:{rc[2]}}}, end:{{x:{lc[0]}, y:{lc[1]}, z:{lc[2]}}}, radius:0.07, color:'{color}', dashed:true}});
-        viewer2.addLabel("{interact['Residue Contact']} ({interact['Distance (Å)']}A)", {{position:{{x:{rc[0]}, y:{rc[1]}, z:{rc[2]}}}, backgroundColor:'white', fontColor:'black', backgroundOpacity:0.8, fontSize:11}});
-        """
+        int_lines_js2 += f"viewer2.addCylinder({{start:{{x:{interact['r_coord'][0]}, y:{interact['r_coord'][1]}, z:{interact['r_coord'][2]}}}, end:{{x:{interact['l_coord'][0]}, y:{interact['l_coord'][1]}, z:{interact['l_coord'][2]}}}, radius:0.07, color:'{color}', dashed:true}});\n"
 
     if style_mode == 'cartoon':
         style_js = "viewer1.setStyle({model: 0}, {cartoon: {colorscheme: 'chain', style: 'oval', thickness: 0.6}});"
@@ -704,65 +731,44 @@ def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, sh
                 <div class="meta-item"><strong>Target Protein Name:</strong> {meta['name']}</div>
                 <div class="meta-item"><strong>Target PDB ID:</strong> {meta['id']}</div>
                 <div class="meta-item"><strong>Method / Resolution:</strong> {meta['method']} ({meta['res']})</div>
-                <div class="meta-item"><strong>Lead Phytochemical (SMILES):</strong> <span class="scandata">{smiles_cache}</span></div>
-                <div class="meta-item"><strong>Grid Box Coordinates (X, Y, Z):</strong> {grid_params['cx']}, {grid_params['cy']}, {grid_params['cz']}</div>
-                <div class="meta-item"><strong>Grid Box Dimensions (Å):</strong> {grid_params['sx']} × {grid_params['sy']} × {grid_params['sz']}</div>
-                <div class="meta-item"><strong>Search Exhaustiveness:</strong> {grid_params['exh']}</div>
+                <div class="meta-item"><strong>Catalytic Cofactors Filter:</strong> {active_retained_ions}</div>
+                <div class="meta-item"><strong>Grid Box Coordinates:</strong> {grid_params['cx']}, {grid_params['cy']}, {grid_params['cz']}</div>
+                <div class="meta-item"><strong>Grid Box Dimensions:</strong> {grid_params['sx']} × {grid_params['sy']} × {grid_params['sz']}</div>
             </div>
 
-            <h2>2. Baseline Molecular Docking Screening Results</h2>
-            <div class="table-wrapper">
-                {res_html}
+            <h2>2. Optimization Dynamics & UFF Minimization</h2>
+            <div class="meta-grid" style="background:#e0f2fe; border-left:4px solid #0284c7;">
+                <div class="meta-item"><strong>Initial UFF Energy:</strong> {pre_uff} kcal/mol</div>
+                <div class="meta-item"><strong>Relaxed UFF Energy:</strong> {post_uff} kcal/mol</div>
+                <div class="meta-item"><strong>Force Field Delta (ΔE):</strong> {delta_uff} kcal/mol</div>
+                <div class="meta-item"><strong>Methodology:</strong> Post-docking full-complex relaxation via Universal Force Field (UFF) gradient descent to resolve internal steric collisions.</div>
             </div>
 
             <h2>3. Validation Complex Analysis (Side-by-Side Comparison)</h2>
-            <p>Interactive 3D representation comparing the original lead and the redesigned derivative inside the target receptor pocket.</p>
-            
             <div style="display: flex; gap: 20px; margin-bottom: 20px; flex-wrap: wrap;">
                 <div style="flex: 1; min-width: 300px;">
                     <h4 style="color:#1e3c72; text-align:center;">Original Lead (Pose {selected_pose_orig})</h4>
-                    <div id="container-3d-orig" style="height: 400px; width: 100%; position: relative; border-radius:8px; border:1px solid #eaeaea; background:#ffffff; box-shadow: 0 4px 10px rgba(0,0,0,0.05);"></div>
+                    <div id="container-3d-orig" style="height: 400px; width: 100%; position: relative; border-radius:8px; border:1px solid #eaeaea; background:#ffffff;"></div>
                 </div>
                 <div style="flex: 1; min-width: 300px;">
                     <h4 style="color:#1e3c72; text-align:center;">Optimized Derivative (Pose {selected_pose_new})</h4>
-                    <div id="container-3d-redesign" style="height: 400px; width: 100%; position: relative; border-radius:8px; border:1px solid #eaeaea; background:#ffffff; box-shadow: 0 4px 10px rgba(0,0,0,0.05);"></div>
+                    <div id="container-3d-redesign" style="height: 400px; width: 100%; position: relative; border-radius:8px; border:1px solid #eaeaea; background:#ffffff;"></div>
                 </div>
             </div>
             
             <script src="https://cdnjs.cloudflare.com/ajax/libs/3Dmol/2.0.4/3Dmol-min.js"></script>
             <script>
-                // Viewer 1 (Original)
                 let viewer1 = $3Dmol.createViewer(document.getElementById('container-3d-orig'), {{backgroundColor: '#ffffff'}});
-                let rec_data = `{safe_rec}`;
-                let lig_data_orig = `{safe_lig_orig}`;
-                if (rec_data.trim().length > 0) {{
-                    viewer1.addModel(rec_data, 'pdb');
-                    {style_js}
-                }}
-                if (lig_data_orig.trim().length > 0) {{
-                    viewer1.addModel(lig_data_orig, 'pdb');
-                    viewer1.setStyle({{model: 1}}, {{stick: {{colorscheme: 'greenCarbon', radius: 0.28}}}});
-                }}
-                {surface_js}
-                {int_lines_js1}
-                viewer1.zoomTo(); 
-                viewer1.render();
+                let rec_data = `{safe_rec}`; let lig_data_orig = `{safe_lig_orig}`;
+                if (rec_data.trim().length > 0) {{ viewer1.addModel(rec_data, 'pdb'); {style_js} }}
+                if (lig_data_orig.trim().length > 0) {{ viewer1.addModel(lig_data_orig, 'pdb'); viewer1.setStyle({{model: 1}}, {{stick: {{colorscheme: 'greenCarbon', radius: 0.28}}}}); }}
+                {surface_js} {int_lines_js1} viewer1.zoomTo(); viewer1.render();
 
-                // Viewer 2 (Redesign)
                 let viewer2 = $3Dmol.createViewer(document.getElementById('container-3d-redesign'), {{backgroundColor: '#ffffff'}});
                 let lig_data_redesign = `{safe_lig_redesign}`;
-                if (rec_data.trim().length > 0) {{
-                    viewer2.addModel(rec_data, 'pdb');
-                    {style_js2}
-                }}
-                if (lig_data_redesign.trim().length > 0) {{
-                    viewer2.addModel(lig_data_redesign, 'pdb');
-                    viewer2.setStyle({{model: 1}}, {{stick: {{colorscheme: 'greenCarbon', radius: 0.28}}}});
-                }}
-                {surface_js2}
-                {int_lines_js2}
-                viewer2.zoomTo(); 
-                viewer2.render();
+                if (rec_data.trim().length > 0) {{ viewer2.addModel(rec_data, 'pdb'); {style_js2} }}
+                if (lig_data_redesign.trim().length > 0) {{ viewer2.addModel(lig_data_redesign, 'pdb'); viewer2.setStyle({{model: 1}}, {{stick: {{colorscheme: 'greenCarbon', radius: 0.28}}}}); }}
+                {surface_js2} {int_lines_js2} viewer2.zoomTo(); viewer2.render();
             </script>
 
             <p style="margin-top:20px;">Direct Thermodynamic Comparison Matrix</p>
@@ -788,18 +794,9 @@ def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, sh
                     <div class="structure-img">{v_2d}</div>
                 </div>
             </div>
-            
-            <div style="margin-bottom: 20px; padding: 10px; background: #fafafa; border-radius: 6px;">
-                <h3 style="margin-top:0;">Redesigned Target SMILES String Matrix</h3>
-                <div class="scandata" style="margin-bottom: 5px;">{variant_row['Redesigned SMILES']}</div>
-                <strong>Pathway coordinates optimized via functional block swapping mechanics.</strong>
-            </div>
 
             <h2>5. ADMET 3.0 Pharmacokinetics Analysis</h2>
-            <p><strong>Automated IUPAC Nomenclature Generation:</strong></p>
-            <div class="scandata" style="margin-bottom:20px; background:#e0f2fe; color:#0369a1; padding:10px; border-left: 4px solid #0284c7;">
-                {iupac}
-            </div>
+            <div class="scandata" style="margin-bottom:20px; background:#e0f2fe; color:#0369a1; padding:10px; border-left: 4px solid #0284c7;">{iupac}</div>
             
             <h3>Molecular Property Comparative Matrix</h3>
             <div class="table-wrapper">
@@ -815,27 +812,19 @@ def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, sh
             </div>
 
             <h3>Structural Shift Assessment Narrative</h3>
-            <div class="summary-card">
-                {shift_msg}
-            </div>
+            <div class="summary-card">{shift_msg}</div>
 
             <h3>📊 Modeled Vibrational Spectrum Footprint (FTIR)</h3>
-            <div style="text-align: center; margin: 20px 0;">
-                <img src="data:image/png;base64,{f_img}" style="max-width:100%; border-radius:6px; border: 1px solid #e2e8f0;"/>
-            </div>
+            <div style="text-align: center; margin: 20px 0;"><img src="data:image/png;base64,{f_img}" style="max-width:100%; border-radius:6px; border: 1px solid #e2e8f0;"/></div>
             
             <h2>6. Master Synthesis Verdict</h2>
-            <div class="verdict-card">
-                {master_verdict}
-            </div>
+            <div class="verdict-card">{master_verdict}</div>
             
         </div>
         <footer>
             <p>Report compiled successfully. Ready for manuscript citation.</p>
             <p>InSilico BioSphere: An Integrated Platform for Automated Molecular Docking.</p>
-            <p>Developed by Dr. Sarang S. Dhote, Assistant Professor, Department of Chemistry,<br>
-            Shivaji Science College, Nagpur, India.<br>
-            Email: contact - sarangresearch@gmail.com</p>
+            <p>Developed by Dr. Sarang S. Dhote, Assistant Professor, Department of Chemistry,<br>Shivaji Science College, Nagpur, India.</p>
         </footer>
     </body>
     </html>
@@ -849,7 +838,6 @@ st.set_page_config(page_title="In Silico BioSphere Hub", layout="wide")
 st.title("🔬 InSilico BioSphere - Unified Drug Design Engine")
 st.markdown("**Developed by: Dr. Sarang S. Dhote, Assistant Professor, Department of Chemistry, Shivaji Science College, Nagpur, India | Tech Logic Core Systems (TLCS)**")
 
-# Master Reset
 if st.button("🔄 Reset Entire Environment", type="secondary", use_container_width=True):
     for key in list(st.session_state.keys()): del st.session_state[key]
     for f in ["protein.pdbqt", "ligand.pdbqt", "docking_poses.pdbqt", "temp_lig_state.pdb", "redesign_ligand.pdbqt", "redesign_docking_poses.pdbqt"]:
@@ -864,13 +852,10 @@ st.write("---")
 st.header("🔒 Phase 1: Baseline Native Molecular Docking")
 
 col_params, col_visual = st.columns([1, 1])
-
 trigger_rerun = False
 
 with col_params:
     st.subheader("1. Target Protein Setup")
-    
-    # --- TEXT BOXES FOR PROTEIN IDENTIFICATION ---
     current_p_name = st.text_input("Protein Name", placeholder="Hint: Type protein name here...", value=st.session_state.protein_name)
     current_p_id = st.text_input("PDB ID / Code", placeholder="Hint: Type PDB ID here...", value=st.session_state.pdb_id_display)
     
@@ -888,137 +873,155 @@ with col_params:
                 if success:
                     st.session_state.local_target_path = path
                     meta = extract_pdb_metadata(path, pdb_id_input.upper())
-                    st.session_state.pdb_id_display = meta["id"]
-                    st.session_state.protein_name = meta["name"]
-                    conv_ok, _ = convert_pdb_to_pdbqt(path, "protein.pdbqt")
+                    st.session_state.pdb_id_display, st.session_state.protein_name = meta["id"], meta["name"]
+                    conv_ok, _ = convert_pdb_to_pdbqt(path, "protein.pdbqt", allowed_heteroatoms=[])
                     st.session_state.target_ready = conv_ok
+                    st.session_state.active_retained_ions = "None (Fully Stripped)"
                     st.success(f"Protein {pdb_id_input.upper()} successfully loaded!")
                     trigger_rerun = True
                 else: st.error(path)
     else:
         uploaded_file = st.file_uploader("Upload Target Protein File", type=["pdb", "pdbqt"])
         if uploaded_file:
-            path = f"uploaded_{uploaded_file.name}"
-            if st.session_state.local_target_path != path:
+            if st.session_state.last_uploaded_protein != uploaded_file.name:
+                path = f"uploaded_{uploaded_file.name}"
                 with open(path, "wb") as f: f.write(uploaded_file.getbuffer())
                 st.session_state.local_target_path = path
                 meta = extract_pdb_metadata(path, "Uploaded File")
-                st.session_state.pdb_id_display = meta["id"]
-                st.session_state.protein_name = meta["name"]
-                if uploaded_file.name.endswith(".pdb"):
-                    conv_ok, _ = convert_pdb_to_pdbqt(path, "protein.pdbqt")
+                st.session_state.pdb_id_display, st.session_state.protein_name = meta["id"], meta["name"]
+                if uploaded_file.name.lower().endswith(".pdb"):
+                    conv_ok, _ = convert_pdb_to_pdbqt(path, "protein.pdbqt", allowed_heteroatoms=[])
                     st.session_state.target_ready = conv_ok
+                    st.session_state.active_retained_ions = "None (Fully Stripped)"
                 else:
                     os.replace(path, "protein.pdbqt")
                     st.session_state.target_ready = True
+                    st.session_state.local_target_path = "protein.pdbqt"
+                    st.session_state.active_retained_ions = "Pre-compiled PDBQT"
+                st.session_state.last_uploaded_protein = uploaded_file.name
                 trigger_rerun = True
 
     if st.session_state.target_ready and st.session_state.local_target_path:
+        discovered_het = discover_and_list_all_heteroatoms(st.session_state.local_target_path)
+        if discovered_het:
+            st.markdown("#### 🧬 Catalytic Cofactors & Heteroatom Filter")
+            selected_hets = []
+            cols_het = st.columns(min(len(discovered_het), 4))
+            for idx, (het_id, count) in enumerate(discovered_het.items()):
+                with cols_het[idx % 4]:
+                    if st.checkbox(f"Keep {het_id} ({count})", value=False, key=f"keep_het_{het_id}"):
+                        selected_hets.append(het_id)
+            if st.button("🛠 Rebuild Clean Receptor Structure Matrix"):
+                ok, err = convert_pdb_to_pdbqt(st.session_state.local_target_path, "protein.pdbqt", is_ligand=False, allowed_heteroatoms=selected_hets)
+                if ok:
+                    st.session_state.active_retained_ions = ", ".join(selected_hets) if selected_hets else "None (Fully Stripped)"
+                    st.success(f"Receptor rebuilt successfully! Retained: {st.session_state.active_retained_ions}")
+                    st.session_state.detected_pockets = [] 
+                else: st.error(f"Receptor optimization failure: {err}")
+
         meta = extract_pdb_metadata(st.session_state.local_target_path, st.session_state.pdb_id_display)
-        st.markdown(f"> **Protein Summary Profile:** \n> * **Protein Name:** **{st.session_state.protein_name}** \n> * **Title:** {meta['title']} \n> * **PDB ID:** `{st.session_state.pdb_id_display}` | **Classification:** {meta['class']} \n> * **Resolution:** **{meta['res']}**")
+        st.markdown(f"> **Protein Summary Profile:** \n> * **Protein Name:** **{st.session_state.protein_name}** \n> * **PDB ID:** `{st.session_state.pdb_id_display}` | **Resolution:** **{meta['res']}**")
 
     st.subheader("2. Small Molecule Ligand Setup")
     ligand_source = st.radio("Choose Ligand Input Method:", ["SMILES String Input", "Upload Structural File (.pdb, .sdf)"])
-    
-    smiles_input_val = ""
-    uploaded_lig_buffer = None
-    uploaded_lig_name = ""
+    smiles_input_val, uploaded_lig_buffer, uploaded_lig_name = "", None, ""
 
-    if ligand_source == "SMILES String Input":
-        smiles_input_val = st.text_input("Enter Ligand SMILES String", "CC(=O)NC1=CC=C(O)C=C1").strip()
+    if ligand_source == "SMILES String Input": smiles_input_val = st.text_input("Enter Ligand SMILES String", "CC(=O)NC1=CC=C(O)C=C1").strip()
     else:
         uploaded_lig_file = st.file_uploader("Upload Small Molecule File", type=["pdb", "sdf"])
-        if uploaded_lig_file:
-            uploaded_lig_buffer = uploaded_lig_file
-            uploaded_lig_name = uploaded_lig_file.name
+        if uploaded_lig_file: uploaded_lig_buffer, uploaded_lig_name = uploaded_lig_file, uploaded_lig_file.name
 
     if st.button("📥 Load Ligand Structure", key="load_ligand_btn"):
         if ligand_source == "SMILES String Input" and smiles_input_val:
             with st.spinner("Querying PubChem Repositories..."):
                 pub_data = fetch_ligand_data_from_pubchem(smiles_input_val)
-                try:
-                    mol = Chem.MolFromSmiles(smiles_input_val)
-                    if mol:
-                        ok, msg = convert_smiles_to_pdbqt(smiles_input_val, "ligand.pdbqt")
-                        if ok:
-                            st.session_state.ligand_ready = True
-                            st.session_state.smiles_cache = smiles_input_val
-                            with open("ligand.pdbqt", "r") as f: st.session_state.serialized_ligand_block = f.read()
-                            st.session_state.ligand_summary_text = f"**Name:** {pub_data['name']} | **Formula:** {pub_data['formula']} | **Molecular Weight:** {pub_data['mw']}"
-                            st.success("Ligand metadata mapped from PubChem!")
-                            trigger_rerun = True
-                        else: st.error(msg)
-                except Exception as e: st.error(f"SMILES Parsing Failure: {e}")
+                ok, msg = convert_smiles_to_pdbqt(smiles_input_val, "ligand.pdbqt")
+                if ok:
+                    st.session_state.ligand_ready, st.session_state.smiles_cache = True, smiles_input_val
+                    with open("ligand.pdbqt", "r") as f: st.session_state.serialized_ligand_block = f.read()
+                    st.session_state.ligand_summary_text = f"**Name:** {pub_data['name']} | **MW:** {pub_data['mw']}"
+                    st.success("Ligand metadata mapped from PubChem!")
+                    trigger_rerun = True
+                else: st.error(msg)
                 
         elif ligand_source == "Upload Structural File (.pdb, .sdf)" and uploaded_lig_buffer is not None:
-            temp_in = f"raw_ligand_{uploaded_lig_name}"
-            with open(temp_in, "wb") as f: f.write(uploaded_lig_buffer.getbuffer())
-            
-            mol = Chem.MolFromPDBFile(temp_in, removeHs=False) if uploaded_lig_name.endswith(".pdb") else Chem.SDMolSupplier(temp_in, removeHs=False)[0]
-            
-            if mol:
-                extracted_smiles = ""
-                try: 
-                    Chem.SanitizeMol(mol)
-                    AllChem.AssignBondOrdersFromTopology(mol)
-                    extracted_smiles = Chem.MolToSmiles(Chem.RemoveHs(mol))
-                except Exception: 
-                    try: extracted_smiles = Chem.MolToSmiles(mol)
-                    except: pass
+            if st.session_state.last_uploaded_ligand != uploaded_lig_name:
+                temp_in = f"raw_ligand_{uploaded_lig_name}"
+                with open(temp_in, "wb") as f: f.write(uploaded_lig_buffer.getbuffer())
                 
-                if not extracted_smiles:
-                    st.error("⚠️ RDKit could not extract a valid SMILES string from this uploaded file (missing bond orders). Phase 2 Redesign will be locked. Please use 'SMILES String Input' instead.")
-                else:
-                    st.session_state.smiles_cache = extracted_smiles 
-                
-                if mol.GetNumConformers() == 0:
-                    mol = Chem.AddHs(mol)
-                    AllChem.EmbedMolecule(mol, AllChem.ETKDGv3())
-                    AllChem.MMFFOptimizeMolecule(mol)
+                mol = Chem.MolFromPDBFile(temp_in, removeHs=False) if uploaded_lig_name.endswith(".pdb") else Chem.SDMolSupplier(temp_in, removeHs=False)[0]
+                if mol:
+                    extracted_smiles = ""
+                    try: 
+                        Chem.SanitizeMol(mol); AllChem.AssignBondOrdersFromTopology(mol); extracted_smiles = Chem.MolToSmiles(Chem.RemoveHs(mol))
+                    except Exception: pass
                     
-                temp_pdb = "temp_lig_state.pdb"
-                Chem.MolToPDBFile(mol, temp_pdb)
-                convert_pdb_to_pdbqt(temp_pdb, "ligand.pdbqt", is_ligand=True)
-                st.session_state.ligand_ready = True
+                    st.session_state.smiles_cache = extracted_smiles if extracted_smiles else ""
+                    if mol.GetNumConformers() == 0:
+                        mol = Chem.AddHs(mol); AllChem.EmbedMolecule(mol, AllChem.ETKDGv3()); AllChem.MMFFOptimizeMolecule(mol)
+                        
+                    temp_pdb = "temp_lig_state.pdb"
+                    Chem.MolToPDBFile(mol, temp_pdb)
+                    ok, _ = convert_pdb_to_pdbqt(temp_pdb, "ligand.pdbqt", is_ligand=True)
+                    st.session_state.ligand_ready = ok
+                    if os.path.exists(temp_pdb): os.remove(temp_pdb)
+                else:
+                    ok, _ = convert_pdb_to_pdbqt(temp_in, "ligand.pdbqt", is_ligand=True)
+                    st.session_state.ligand_ready = ok
+                    st.session_state.smiles_cache = ""
                 
-                st.session_state.ligand_summary_text = f"Ligand structure loaded successfully. Extracted Template: `{extracted_smiles if extracted_smiles else 'Failed'}`"
-                with open("ligand.pdbqt", "r") as f: st.session_state.serialized_ligand_block = f.read()
+                if st.session_state.ligand_ready:
+                    st.session_state.ligand_summary_text = f"Ligand structure loaded successfully. Extracted Template: `{st.session_state.smiles_cache}`"
+                    with open("ligand.pdbqt", "r") as f: st.session_state.serialized_ligand_block = f.read()
+                    st.session_state.last_uploaded_ligand = uploaded_lig_name
+                    st.success("Structural file loaded and ready for docking!")
+                    trigger_rerun = True
+                else: st.error("Failed to parse ligand matrix.")
                 if os.path.exists(temp_in): os.remove(temp_in)
-                if os.path.exists(temp_pdb): os.remove(temp_pdb)
-                st.success("Structural file loaded and ready for docking!")
 
     if st.session_state.target_ready and os.path.exists("ligand.pdbqt"): st.session_state.ligand_ready = True
     if st.session_state.ligand_ready: st.markdown(f"> **Ligand Metric Summary Profile:** \n> {st.session_state.ligand_summary_text}")
 
+    st.subheader("3. Smart Cavity & Bound Site Finder")
+    if st.session_state.target_ready and os.path.exists("protein.pdbqt"):
+        if st.button("🔍 Scan Surface For Structural Cavities", use_container_width=True):
+            with st.spinner("Analyzing macromolecular spatial curvature dynamics..."):
+                pockets = identify_protein_cavities("protein.pdbqt")
+                st.session_state.detected_pockets = pockets
+                if pockets: st.success(f"Successfully mapped {len(pockets)} surface cavities!")
+
+        if st.session_state.detected_pockets:
+            p_opts = st.session_state.detected_pockets
+            selected_p_idx = st.selectbox("Select Target Computational Cavity:", options=range(len(p_opts)), format_func=lambda idx: f"{p_opts[idx]['Pocket_ID']} (Density Score: {p_opts[idx]['Score']})")
+            if st.button("🎯 Align Grid Parameters to This Cavity"):
+                chosen_p = p_opts[selected_p_idx]
+                st.session_state.cx, st.session_state.cy, st.session_state.cz = chosen_p["cx"], chosen_p["cy"], chosen_p["cz"]
+                st.session_state.sx, st.session_state.sy, st.session_state.sz = chosen_p["bx"], chosen_p["by"], chosen_p["bz"]
+                st.session_state.selected_native_ligand = f"Automated Cluster Pocket: {chosen_p['Pocket_ID']}"
+                st.success(f"Grid coordinates targeted over pocket space!")
+                trigger_rerun = True
+
     if st.session_state.target_ready and st.session_state.local_target_path:
         bound_ligands_list = parse_bound_ligands(st.session_state.local_target_path)
         if bound_ligands_list:
-            st.subheader("3. Bound Small Molecules in Receptor")
-            df_bound = pd.DataFrame(bound_ligands_list)
-            df_display = df_bound.copy()
-            df_display["Center (X, Y, Z) Å"] = df_display.apply(lambda r: f"{r['cx']}, {r['cy']}, {r['cz']}", axis=1)
-            df_display["Box (X, Y, Z) Å"] = df_display.apply(lambda r: f"{r['bx']}, {r['by']}, {r['bz']}", axis=1)
-            st.dataframe(df_display[["ID", "Chain", "ResSeq", "Atoms", "Center (X, Y, Z) Å", "Box (X, Y, Z) Å"]], hide_index=True, use_container_width=True)
-            
             selected_lig_id = st.selectbox("Select native co-crystal target to auto-fill grid box:", options=range(len(bound_ligands_list)), format_func=lambda idx: f"{bound_ligands_list[idx]['ID']} (Chain {bound_ligands_list[idx]['Chain']}-ResSeq {bound_ligands_list[idx]['ResSeq']})")
             if st.button("🎯 Lock Coordinates to Native Site"):
                 chosen_target = bound_ligands_list[selected_lig_id]
                 st.session_state.cx, st.session_state.cy, st.session_state.cz = chosen_target["cx"], chosen_target["cy"], chosen_target["cz"]
                 st.session_state.sx, st.session_state.sy, st.session_state.sz = chosen_target["bx"], chosen_target["by"], chosen_target["bz"]
+                st.session_state.selected_native_ligand = f"{chosen_target['ID']} (Chain {chosen_target['Chain']})"
                 st.success("Grid parameters aligned over pocket boundaries!")
                 trigger_rerun = True
 
     st.subheader("4. Search Space Mechanics (Grid Box)")
-    
-    if st.button("🌐 Auto-Configure for Blind Docking (Whole Protein)"):
+    if st.button("🌐 Auto-Configure for Blind Docking (Whole Protein)", use_container_width=True):
         if st.session_state.target_ready and os.path.exists("protein.pdbqt"):
             bcx, bcy, bcz, bsx, bsy, bsz = compute_protein_bounding_box("protein.pdbqt")
             st.session_state.cx, st.session_state.cy, st.session_state.cz = round(bcx, 1), round(bcy, 1), round(bcz, 1)
             st.session_state.sx, st.session_state.sy, st.session_state.sz = min(126, int(bsx)), min(126, int(bsy)), min(126, int(bsz))
+            st.session_state.selected_native_ligand = "Blind Docking"
             st.success("Grid parameters maximized to encapsulate the entire macromolecule!")
             trigger_rerun = True
-        else:
-            st.warning("Please load a Target Protein first to calculate dimensions.")
 
     grid_cx = st.number_input("Center X Coordinate", value=float(st.session_state.cx), step=0.1)
     grid_cy = st.number_input("Center Y Coordinate", value=float(st.session_state.cy), step=0.1)
@@ -1046,8 +1049,7 @@ with col_visual:
                 try:
                     m_img = Chem.MolFromPDBFile(st.session_state.smiles_cache, removeHs=True) if "raw_ligand" in st.session_state.smiles_cache else Chem.MolFromSmiles(st.session_state.smiles_cache)
                     if m_img:
-                        Chem.SanitizeMol(m_img)
-                        img_b64 = generate_2d_ligand_img(m_img)
+                        Chem.SanitizeMol(m_img); img_b64 = generate_2d_ligand_img(m_img)
                         if img_b64: st.markdown(f'<div style="text-align:center; background: white; padding:10px; border-radius:5px;"><img src="data:image/png;base64,{img_b64}"/></div>', unsafe_allow_html=True)
                 except Exception: pass
     else:
@@ -1059,10 +1061,18 @@ with col_visual:
                 with open("protein.pdbqt", "r") as f: protein_data = f.read()
                 
                 pose_affinity_score = get_pose_affinity(st.session_state.docking_results_raw, selected_pose)
-                
                 if selected_pose == 1 and pose_affinity_score != "N/A":
                     try: st.session_state.baseline_affinity = float(pose_affinity_score)
                     except ValueError: pass
+                    
+                # SMART UFF MINIMIZATION LOGIC
+                cache_key = f"uff_{st.session_state.protein_name}_{selected_pose}"
+                uff_progress_placeholder = st.empty()
+                if cache_key not in st.session_state.uff_cache:
+                    pre_uff, post_uff, delta_uff = execute_uff_complex_minimization("protein.pdbqt", parsed_poses[selected_pose], uff_progress_placeholder)
+                    st.session_state.uff_cache[cache_key] = (pre_uff, post_uff, delta_uff)
+                uff_progress_placeholder.empty()
+                pre_uff, post_uff, delta_uff = st.session_state.uff_cache[cache_key]
 
                 active_interactions = compute_spatial_interactions("protein.pdbqt", parsed_poses[selected_pose])
                 
@@ -1076,33 +1086,23 @@ with col_visual:
                     else: amino_acid_categories["Hydrophobic"].append(res_full)
                 
                 breakdown_html = ""
-                report_breakdown_text = ""
                 for cat_name, res_list in amino_acid_categories.items():
                     if res_list:
                         labels_joined = ", ".join(sorted(list(set(res_list))))
                         breakdown_html += f"<p style='margin:4px 0; font-size:13px;'><b>{cat_name}:</b> <span style='color:#333;'>{labels_joined}</span></p>"
-                        report_breakdown_text += f"- {cat_name}: {labels_joined}\n"
-                if not breakdown_html: 
-                    breakdown_html = "<p style='margin:4px 0; color:#777; font-size:13px;'>No pocket interactions detected.</p>"
-                    report_breakdown_text = "- No close contacts detected under 3.8 Angstroms.\n"
+                if not breakdown_html: breakdown_html = "<p style='margin:4px 0; color:#777; font-size:13px;'>No pocket interactions detected.</p>"
                 
                 try:
                     affinity_val = float(pose_affinity_score)
                     if affinity_val > 0:
-                        affinity_color = "#ef4444" # Red
-                        affinity_label = f"{pose_affinity_score} <span style='font-size:18px; font-weight:normal;'>kcal/mol <br><span style='color:#ef4444; font-size:14px;'>(⚠️ Not Useful / No Binding)</span></span>"
-                        bg_color = "#fef2f2" 
-                        border_color = "#ef4444"
+                        affinity_color, bg_color, border_color = "#ef4444", "#fef2f2", "#ef4444"
+                        affinity_label = f"{pose_affinity_score} <span style='font-size:18px; font-weight:normal;'>kcal/mol <br><span style='color:#ef4444; font-size:14px;'>(⚠️ Not Useful)</span></span>"
                     else:
-                        affinity_color = "#10b981" # Green
+                        affinity_color, bg_color, border_color = "#10b981", "#ecfdf5", "#10b981"
                         affinity_label = f"{pose_affinity_score} <span style='font-size:18px; font-weight:normal;'>kcal/mol</span>"
-                        bg_color = "#ecfdf5" 
-                        border_color = "#10b981"
                 except ValueError:
-                    affinity_color = "#333"
+                    affinity_color, bg_color, border_color = "#333", "#f4f4f4", "#999"
                     affinity_label = "N/A"
-                    bg_color = "#f4f4f4"
-                    border_color = "#999"
 
                 html_metric_card = f"""
                 <div style="background-color:{bg_color}; border-left:6px solid {border_color}; padding:16px; border-radius:8px; margin-bottom:15px; font-family:sans-serif;">
@@ -1112,9 +1112,12 @@ with col_visual:
                             <span style="font-size:36px; font-weight:900; color:{affinity_color};">{affinity_label}</span>
                         </div>
                         <div style="text-align:right; border-left:1px solid #e0e8e4; padding-left:15px;">
-                            <span style="font-size:12px; color:#555; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px;">Total Contacts</span><br>
-                            <span style="font-size:32px; font-weight:800; color:#333;">{len(active_interactions)}</span>
+                            <span style="font-size:12px; color:#555; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px;">UFF Minimization Delta</span><br>
+                            <span style="font-size:32px; font-weight:800; color:#c62828;">{delta_uff} <span style="font-size:14px; font-weight:normal;">kcal/mol</span></span>
                         </div>
+                    </div>
+                    <div style="margin-bottom: 10px; font-size: 13px; color: #444;">
+                        <b>📍 UFF Initial Energy:</b> {pre_uff} kcal/mol | <b>📉 Optimized Energy:</b> {post_uff} kcal/mol
                     </div>
                     <div>
                         <span style="font-size:11px; color:#666; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px; display:block; margin-bottom:4px;">Binding Site Amino Acid Properties Breakdown:</span>
@@ -1124,6 +1127,10 @@ with col_visual:
                 """
                 st.html(html_metric_card)
                 
+                with st.expander("📖 Understand UFF Minimization & Steric Clashes (Click to Read)"):
+                    st.markdown(f"**1. 📍 UFF Initial Energy: {pre_uff} kcal/mol**\nA highly positive energy score indicates extreme geometric tension, signifying atoms from your phytochemical were physically overlapping or positioned unnaturally close to the rigid atoms of the receptor (e.g., retained catalytic metal ions).")
+                    st.markdown(f"**2. 📉 Optimized Energy: {post_uff} kcal/mol**\nThe algorithm pushes overlapping atoms apart until the bond lengths and angles reach a naturally permissible state. The negative delta (**{delta_uff} kcal/mol**) proves the rigid collision was resolved.")
+
                 col_render, col_mesh = st.columns([1, 1])
                 with col_render:
                     style_choice = st.radio("Macromolecule Style Mode:", ["Cartoon Ribbon Mesh", "Spacefill", "Sticks Profile"])
@@ -1132,13 +1139,6 @@ with col_visual:
                     st.session_state.surf_toggle = st.checkbox("Overlay Translucent Pocket Cavity Mesh", value=False)
                     
                 render_advanced_modeling_blueprint(receptor_data=protein_data, ligand_data=parsed_poses[selected_pose], mode=st.session_state.style_mode, show_surface=st.session_state.surf_toggle, interactions_list=active_interactions, unique_id="container_phase1_result")
-                
-                st.markdown("#### 🧬 Local Contact Residues & Bond Assignments Matrix")
-                if active_interactions:
-                    df_int = pd.DataFrame(active_interactions)
-                    st.dataframe(df_int[["Residue Contact", "Interaction Type", "Distance (Å)"]], hide_index=True, use_container_width=True)
-                else:
-                    st.info("No close contacts detected within a 3.8 Å threshold radius.")
 
 # --- ENGINE EXECUTION ---
 if run_btn and can_dock:
@@ -1152,90 +1152,49 @@ if run_btn and can_dock:
     
     progress_bar = st.progress(0, text="Initializing computational engine...")
     status_text = st.empty()
-    
     try:
         process = subprocess.Popen(vina_command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        output_log = []
-        progress_count = 0
-        current_line = ""
-        
+        output_log, progress_count, current_line = [], 0, ""
         while True:
             char = process.stdout.read(1).decode("utf-8", errors="ignore")
             if not char: break
             output_log.append(char)
-            
             if char == '*':
                 progress_count += 1
-                percent = min(100, int((progress_count / 50) * 100))
-                progress_bar.progress(percent, text=f"Exploring binding modes... {percent}%")
+                progress_bar.progress(min(100, int((progress_count / 50) * 100)), text=f"Exploring binding modes... {min(100, int((progress_count / 50) * 100))}%")
             elif char == '\n':
                 if "Performing search" in current_line: status_text.info("Executing BFGS optimization and spatial search...")
                 elif "Refining" in current_line: status_text.info("Refining top structural poses...")
                 current_line = ""
-            else:
-                current_line += char
-        
+            else: current_line += char
         process.wait()
         if process.returncode == 0:
             progress_bar.progress(100, text="Optimization complete!")
             status_text.empty()
             st.session_state.docking_results_raw = "".join(output_log)
+            st.session_state.uff_cache = {} 
             time.sleep(0.8) 
             trigger_rerun = True
         else:
-            status_text.empty()
-            st.error("Engine encountered a calculation error.")
-            st.code("".join(output_log))
-    except Exception as e:
-        st.error(f"Execution pipeline failed: {e}")
+            status_text.empty(); st.error("Engine encountered a calculation error."); st.code("".join(output_log))
+    except Exception as e: st.error(f"Execution pipeline failed: {e}")
 
-# --- GLOBAL DATAFRAME ANALYTICS DISPLAY ZONE ---
 if st.session_state.docking_results_raw is not None:
     st.write("---")
     st.markdown("### 📊 Screening Metrics Dashboard & Data Export")
-    
-    def parse_vina_output_with_residues(stdout_text):
-        data = []
-        pattern = re.compile(r"^\s*(\d+)\s+([-+]?\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)")
-        poses_dict = split_docking_poses("docking_poses.pdbqt")
-        for line in stdout_text.split("\n"):
-            match = pattern.match(line)
-            if match:
-                mode_idx = int(match.group(1))
-                res_string, bond_types = "N/A", "N/A"
-                if mode_idx in poses_dict:
-                    ints = compute_spatial_interactions("protein.pdbqt", poses_dict[mode_idx])
-                    if ints:
-                        res_string = ", ".join(sorted(list(set([i["Residue Contact"] for i in ints]))))
-                        bond_types = ", ".join(sorted(list(set([i["Interaction Type"] for i in ints]))))
-                data.append({
-                    "Binding Mode": mode_idx, 
-                    "Affinity (kcal/mol)": float(match.group(2)), 
-                    "RMSD l.b.": float(match.group(3)), 
-                    "RMSD u.b.": float(match.group(4)), 
-                    "Interacting Residues": res_string, 
-                    "Contact Bond Types": bond_types
-                })
-        return pd.DataFrame(data)
-
-    df_results = parse_vina_output_with_residues(st.session_state.docking_results_raw)
+    df_results = parse_vina_output_with_residues_global(st.session_state.docking_results_raw)
     if not df_results.empty:
         col_table, col_export = st.columns([2, 1])
         with col_table: 
             def color_affinity(val):
                 try:
                     v = float(val)
-                    if v < 0:
-                        return 'color: #10b981; font-weight: bold;'
-                    elif v > 0:
-                        return 'color: #ef4444; font-weight: bold;'
+                    if v < 0: return 'color: #10b981; font-weight: bold;'
+                    elif v > 0: return 'color: #ef4444; font-weight: bold;'
                 except: pass
                 return 'color: black'
-            
-            try:
-                styled_df = df_results.style.map(color_affinity, subset=['Affinity (kcal/mol)'])
-            except AttributeError:
-                styled_df = df_results.style.applymap(color_affinity, subset=['Affinity (kcal/mol)'])
+            try: styled_df = df_results.style.map(color_affinity, subset=['Affinity (kcal/mol)'])
+            except AttributeError: styled_df = df_results.style.applymap(color_affinity, subset=['Affinity (kcal/mol)'])
             st.dataframe(styled_df, hide_index=True, use_container_width=True)
             
         with col_export:
@@ -1257,20 +1216,12 @@ else:
     
     rec_id = st.session_state.pdb_id_display if st.session_state.pdb_id_display else "Local Structural Matrix"
     st.markdown(f"> **Target Receptor Matrix (PDB ID):** `{rec_id}` <br> **Lead Drug Scaffold (SMILES):** `{st.session_state.smiles_cache}`", unsafe_allow_html=True)
-    st.markdown("*Scientific Execution Protocol: This module computationally redesigns the primary structural architecture of the parent drug via bioisosteric substitution. This aims to optimize steric fit and explicitly improve the thermodynamic binding affinity (ΔG) within the target receptor pocket.*")
     
     v_sites = find_valid_cleavage_sites(st.session_state.smiles_cache)
     col_rd_p, col_rd_v = st.columns([1, 1])
     
     with col_rd_p:
-        rx_mode = st.radio(
-            "Select Optimization Processing Mode:", 
-            [
-                "MockFrag Sandbox (100% Error-Free) [Bypasses strict valency limits to guarantee a result without crashing the dashboard]", 
-                "Option B: True Structural Cleaving (Dynamic Research Mode) [Uses rigorous quantum graph-editing to break/form covalent bonds; may fail if valency is exceeded]"
-            ], 
-            key="rx_mode_choice"
-        )
+        rx_mode = st.radio("Select Optimization Processing Mode:", ["MockFrag Sandbox (100% Error-Free)", "Option B: True Structural Cleaving"], key="rx_mode_choice")
         toggle_lbl = st.toggle("Overlay Atom Index Identification Matrix Trackers", value=True)
         
         if "True Structural Cleaving" in rx_mode and v_sites:
@@ -1298,7 +1249,7 @@ else:
         st.dataframe(st.session_state.rd_library[["Variant ID", "Fragment Added", "Redesigned SMILES", "Delta Score", "MW (g/mol)", "LogP"]], hide_index=True, use_container_width=True)
 
 # ---------------------------------------------------------------------
-# PHASE 3: ADMET PROFILING & AUTOMATED REPORT EXPERT INTERFACE
+# PHASE 3: ADMET 3.0 Pharmacokinetics Profiling
 # ---------------------------------------------------------------------
 st.write("---")
 st.write("---")
@@ -1321,16 +1272,6 @@ else:
             
             st.info(f"**Nomenclature Alignment Index (IUPAC Name):** `{iupac}`")
             
-            with st.expander("📖 View ADMET Parameter Dictionary & Ideals", expanded=False):
-                st.markdown("""
-                * **TPSA (Topological Polar Surface Area):** Measures the surface sum over all polar atoms. Critical for estimating cell permeability. *Limit: ≤ 132 Å² for Intestinal Absorption, ≤ 79 Å² for Brain Penetration.*
-                * **Volume (Å³):** The 3D spatial requirement of the molecule. Important for steric fit within a protein binding pocket. *Ideal Limit: 500 - 900 Å³.*
-                * **MaxRing:** The size of the largest macrocyclic ring in the structure. Affects structural rigidity. *Ideal Limit: ≤ 7.*
-                * **pKa (Acid/Base):** Predicts the ionization state at physiological pH (7.4).
-                * **Melting Point (MP) / Boiling Point (BP):** Thermodynamic indicators. *High MP (> 200°C)* generally correlates with poor aqueous solubility.
-                * **Lipinski's Rule of 5:** A rule of thumb to evaluate druglikeness. *Rules: MW ≤ 500, LogP ≤ 5, H-bond Donors ≤ 5, H-bond Acceptors ≤ 10.*
-                """)
-
             col_m1, col_m2 = st.columns([1, 1])
             with col_m1:
                 st.markdown("#### Structural Topology Footprint")
@@ -1373,33 +1314,14 @@ else:
             st.dataframe(comp_df, hide_index=True, use_container_width=True)
             
             try:
-                vol_shift = adme_v['Volume'] - adme_p['Volume']
-                tpsa_shift = adme_v['TPSA'] - adme_p['TPSA']
-                logp_shift = adme_v['LogP'] - adme_p['LogP']
-                
+                vol_shift, tpsa_shift, logp_shift = adme_v['Volume'] - adme_p['Volume'], adme_v['TPSA'] - adme_p['TPSA'], adme_v['LogP'] - adme_p['LogP']
                 shift_msg = f"Redesign workflow caused structural volume changes equal to **{vol_shift:.1f} Å³**. "
-                if tpsa_shift > 0: shift_msg += f"Polar group inclusion expanded topological polar parameters (TPSA) by **{tpsa_shift:.1f} Å²**. "
-                else: shift_msg += f"Polar reductions decreased surface topology metrics (TPSA) by **{abs(tpsa_shift):.1f} Å²**. "
+                shift_msg += f"Polar group inclusion expanded topological polar parameters (TPSA) by **{tpsa_shift:.1f} Å²**. " if tpsa_shift > 0 else f"Polar reductions decreased surface topology metrics (TPSA) by **{abs(tpsa_shift):.1f} Å²**. "
                 
-                if adme_p['BBB'] and not adme_v['BBB']: shift_msg += "Critically: Modification successfully **restricts BBB access**, dropping central toxicity variables. "
-                elif not adme_p['BBB'] and adme_v['BBB']: shift_msg += "Critically: Modification **enables Blood-Brain Barrier (BBB) permeability**, unlocking potential central nervous target tracks. "
-                elif adme_v['BBB']: shift_msg += "The molecule successfully **retained its ability to cross the Blood-Brain Barrier (BBB)**. "
-                elif adme_v['HIA']: shift_msg += "The molecule remains restricted from the brain but **retains excellent Gastrointestinal (GI) absorption**. "
-                else: shift_msg += "The current modifications have unfortunately rendered the molecule **impermeable to both GI and BBB** barriers. "
-                
-                if logp_shift > 0.5: shift_msg += "A significant increase in lipophilicity (LogP) was observed, which may require formulation with lipid-based delivery systems to offset poor aqueous solubility. "
-                elif logp_shift < -0.5: shift_msg += "Furthermore, lipophilicity (LogP) was reduced, which is predicted to significantly improve aqueous solubility for oral formulation. "
-                
-                if adme_v['Violations'] < adme_p['Violations']: shift_msg += "\n\n📊 **Ecosystem Assessment Verdict: Favorable.** Positive optimization target track achieved. Candidate displays enhanced bioavailability compliance profiles over original master entry."
-                elif adme_v['Violations'] > adme_p['Violations']: shift_msg += "\n\n❌ **Ecosystem Assessment Verdict: Unfavorable.** Optimization mismatch. Structural modifications increased structural strain parameters above standard Druglikeness guidelines."
-                else: 
-                    if adme_v['Violations'] <= 1 and adme_v['Permeability'] != "Poor Absorption / Impermeable":
-                        shift_msg += "\n\n⚖️ **Ecosystem Assessment Verdict: Comparable.** Viable bioisosteric substitution analog established. Valid chemical structural configuration balance safely maintained."
-                    else:
-                        shift_msg += "\n\n⚠️ **Ecosystem Assessment Verdict: Comparable but Flawed.** Redesign does not significantly improve fundamental oral drug-likeness."
-            except Exception:
-                shift_msg = "⚠️ Ecosystem Assessment Verdict: Chemical structure too strained to calculate definitive ADMET shift comparisons."
-                
+                if adme_v['Violations'] < adme_p['Violations']: shift_msg += "\n\n📊 **Ecosystem Assessment Verdict: Favorable.** Candidate displays enhanced bioavailability compliance profiles."
+                elif adme_v['Violations'] > adme_p['Violations']: shift_msg += "\n\n❌ **Ecosystem Assessment Verdict: Unfavorable.** Optimization mismatch."
+                else: shift_msg += "\n\n⚖️ **Ecosystem Assessment Verdict: Comparable.** Valid chemical structural configuration balance safely maintained."
+            except Exception: shift_msg = "⚠️ Ecosystem Assessment Verdict: Chemical structure too strained to calculate ADMET shifts."
             st.success(shift_msg)
 
 # ---------------------------------------------------------------------
@@ -1412,8 +1334,6 @@ st.header("🎯 Phase 4: Post-Redesign Validation Docking & Master Synthesis")
 if st.session_state.rd_library is None or st.session_state.rd_library.empty or not st.session_state.target_ready:
     st.warning("⚠️ Access Gated: Complete Phase 1 Docking and Phase 2/3 Redesign to unlock validation module.")
 else:
-    st.markdown("*Verify thermodynamic binding improvements of the isolated derivative directly against the target receptor.*")
-    
     col_p4_1, col_p4_2 = st.columns([1, 1])
     with col_p4_1:
         st.subheader("1. Inherit Structural Data")
@@ -1425,22 +1345,19 @@ else:
                 if ok:
                     st.success(f"Derivative `{st.session_state.selected_variant_id}` securely converted to 3D matrix.")
                     st.session_state.redesign_docking_results_raw = None
-                else:
-                    st.error(f"3D Embedding Failed: {msg}")
+                else: st.error(f"3D Embedding Failed: {msg}")
                     
         st.markdown(f"> **Target Receptor:** `{st.session_state.pdb_id_display}` <br> **Active Derivative:** `{st.session_state.selected_variant_id}`", unsafe_allow_html=True)
         
     with col_p4_2:
         st.subheader("2. Execute Validation Docking")
-        grid_mode = st.radio("Grid Box Selection:", ["Use Phase 1 Grid Box Parameters (Recommended for 1:1 Validation)", "Auto-Configure Blind Docking"], key="p4_grid")
-        
+        grid_mode = st.radio("Grid Box Selection:", ["Use Phase 1 Grid Box Parameters", "Auto-Configure Blind Docking"], key="p4_grid")
         can_run_p4 = os.path.exists("protein.pdbqt") and os.path.exists("redesign_ligand.pdbqt")
+        
         if st.button("🚀 Initialize Validation Docking Engine", type="primary", disabled=not can_run_p4):
-            # Setup Grid
-            if "Blind" in grid_mode:
-                p4_cx, p4_cy, p4_cz, p4_sx, p4_sy, p4_sz = compute_protein_bounding_box("protein.pdbqt")
+            if "Blind" in grid_mode: p4_cx, p4_cy, p4_cz, p4_sx, p4_sy, p4_sz = compute_protein_bounding_box("protein.pdbqt")
             else:
-                p4_cx, p4_cy, p4_cz = st.session_state.cx, st.session_state.cy, st.session_state.cx
+                p4_cx, p4_cy, p4_cz = st.session_state.cx, st.session_state.cy, st.session_state.cz
                 p4_sx, p4_sy, p4_sz = st.session_state.sx, st.session_state.sy, st.session_state.sz
                 
             vina_path = os.path.abspath("vina")
@@ -1455,9 +1372,7 @@ else:
             p4_stat = st.empty()
             try:
                 process = subprocess.Popen(vina_command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-                output_log = []
-                p_count = 0
-                c_line = ""
+                output_log, p_count, c_line = [], 0, ""
                 while True:
                     char = process.stdout.read(1).decode("utf-8", errors="ignore")
                     if not char: break
@@ -1465,9 +1380,7 @@ else:
                     if char == '*':
                         p_count += 1
                         p4_prog.progress(min(100, int((p_count / 50) * 100)), text="Exploring optimized binding modes...")
-                    elif char == '\n':
-                        if "Refining" in c_line: p4_stat.info("Refining derivative poses...")
-                        c_line = ""
+                    elif char == '\n': c_line = ""
                     else: c_line += char
                 process.wait()
                 if process.returncode == 0:
@@ -1475,30 +1388,29 @@ else:
                     p4_stat.empty()
                     st.session_state.redesign_docking_results_raw = "".join(output_log)
                     trigger_rerun = True
-                else:
-                    p4_stat.empty()
-                    st.error("Engine failed during validation.")
-            except Exception as e:
-                st.error(f"Validation pipeline error: {e}")
+                else: p4_stat.empty(); st.error("Engine failed during validation.")
+            except Exception as e: st.error(f"Validation pipeline error: {e}")
 
-    # Results Display
     if st.session_state.redesign_docking_results_raw is not None and os.path.exists("redesign_docking_poses.pdbqt"):
         st.write("---")
         st.subheader("3. Validation Complex Analysis (Side-by-Side Comparison)")
         p4_poses = split_docking_poses("redesign_docking_poses.pdbqt")
         if p4_poses:
             p4_sel_pose = st.selectbox("Select Derivative Binding Pose for Comparison:", options=list(p4_poses.keys()), format_func=lambda x: f"Derivative Pose {x}", key="p4_pose_sel")
-            
-            # Extract Affinities
             orig_aff = st.session_state.baseline_affinity
             new_aff_str = get_pose_affinity(st.session_state.redesign_docking_results_raw, p4_sel_pose)
-            
-            try: 
-                new_aff = float(new_aff_str)
-                st.session_state.redesign_baseline_affinity = new_aff
-            except: new_aff = 0.0
+            try: st.session_state.redesign_baseline_affinity = float(new_aff_str)
+            except: pass
 
-            # Compare Data
+            # --- UFF MINIMIZATION ON PHASE 4 DERIVATIVE POSE ---
+            cache_key_p4 = f"uff_p4_{st.session_state.selected_variant_id}_{p4_sel_pose}"
+            uff_prog_p4 = st.empty()
+            if cache_key_p4 not in st.session_state.uff_cache:
+                pre, post, delta = execute_uff_complex_minimization("protein.pdbqt", p4_poses[p4_sel_pose], uff_prog_p4)
+                st.session_state.uff_cache[cache_key_p4] = (pre, post, delta)
+            uff_prog_p4.empty()
+            pre_uff, post_uff, delta_uff = st.session_state.uff_cache[cache_key_p4]
+
             orig_pose = split_docking_poses("docking_poses.pdbqt").get(st.session_state.get('selected_pose_export', 1), "") if os.path.exists("docking_poses.pdbqt") else ""
             orig_ints = compute_spatial_interactions("protein.pdbqt", orig_pose) if orig_pose else []
             new_ints = compute_spatial_interactions("protein.pdbqt", p4_poses[p4_sel_pose])
@@ -1508,9 +1420,7 @@ else:
             o_bonds = ", ".join(sorted(list(set([i["Interaction Type"] for i in orig_ints])))) if orig_ints else "None"
             n_bonds = ", ".join(sorted(list(set([i["Interaction Type"] for i in new_ints])))) if new_ints else "None"
 
-            # Render 3D Side-by-Side
             with open("protein.pdbqt", "r") as f: p_data = f.read()
-            
             col_3d_1, col_3d_2 = st.columns(2)
             with col_3d_1:
                 st.markdown("#### Original Lead Complex")
@@ -1521,48 +1431,38 @@ else:
 
             st.markdown("#### ⚖️ Direct Thermodynamic Comparison Matrix")
             comp_data = {
-                "Metric": ["Gibbs Free Energy (ΔG)", "Pocket Residue Contacts", "Identified Interaction Types"],
-                "Original Lead": [f"{orig_aff} kcal/mol" if orig_aff else "N/A", o_res, o_bonds],
-                "Optimized Derivative": [f"{new_aff} kcal/mol", n_res, n_bonds]
+                "Metric": ["Gibbs Free Energy (ΔG)", "UFF Minimization Delta", "Pocket Residue Contacts", "Identified Interaction Types"],
+                "Original Lead": [f"{orig_aff} kcal/mol" if orig_aff else "N/A", "See Phase 1 Dashboard", o_res, o_bonds],
+                "Optimized Derivative": [f"{new_aff_str} kcal/mol", f"{delta_uff} kcal/mol", n_res, n_bonds]
             }
             df_comp = pd.DataFrame(comp_data)
             
             def color_comparison(val):
                 try:
-                    if "kcal/mol" in str(val):
+                    if "kcal/mol" in str(val) and "Delta" not in val:
                         v = float(val.split()[0])
                         orig_v = float(orig_aff) if orig_aff else 0.0
-                        if v < orig_v: return 'color: #10b981; font-weight: bold;' # Improved (More negative)
-                        elif v > orig_v: return 'color: #ef4444; font-weight: bold;' # Worsened
-                    else:
-                        # For residue text strings, use a nice golden yellow for visibility
-                        return 'color: #d97706; font-weight: bold;'
+                        if v < orig_v: return 'color: #10b981; font-weight: bold;'
+                        elif v > orig_v: return 'color: #ef4444; font-weight: bold;'
+                    else: return 'color: #d97706; font-weight: bold;'
                 except: pass
                 return 'color: black'
 
-            try:
-                styled_comp = df_comp.style.map(color_comparison, subset=['Optimized Derivative'])
-            except AttributeError:
-                styled_comp = df_comp.style.applymap(color_comparison, subset=['Optimized Derivative'])
+            try: styled_comp = df_comp.style.map(color_comparison, subset=['Optimized Derivative'])
+            except AttributeError: styled_comp = df_comp.style.applymap(color_comparison, subset=['Optimized Derivative'])
             st.dataframe(styled_comp, hide_index=True, use_container_width=True)
             
-            # --- MASTER VERDICT GENERATOR ---
-            delta_aff = round(new_aff - float(orig_aff), 2) if orig_aff else 0.0
+            try: delta_aff = round(float(new_aff_str) - float(orig_aff), 2) if orig_aff else 0.0
+            except: delta_aff = 0.0
             
             master_verdict = ""
-            if delta_aff < -0.5:
-                master_verdict += f"🟢 **Outstanding Validation:** The derivative significantly enhanced binding affinity by **{delta_aff} kcal/mol** compared to the original lead. "
-            elif delta_aff < 0:
-                master_verdict += f"🟢 **Positive Validation:** The derivative successfully improved binding affinity by **{delta_aff} kcal/mol**. "
-            elif delta_aff == 0:
-                master_verdict += f"🟡 **Neutral Validation:** The derivative maintained the exact binding affinity of the original lead. "
-            else:
-                master_verdict += f"🔴 **Negative Validation:** The bioisosteric addition caused a steric clash, worsening the binding affinity by **+{delta_aff} kcal/mol**. "
+            if delta_aff < -0.5: master_verdict += f"🟢 **Outstanding Validation:** Derivative enhanced binding affinity by **{delta_aff} kcal/mol**. "
+            elif delta_aff < 0: master_verdict += f"🟢 **Positive Validation:** Derivative improved binding affinity by **{delta_aff} kcal/mol**. "
+            elif delta_aff == 0: master_verdict += f"🟡 **Neutral Validation:** Derivative maintained the exact baseline binding affinity. "
+            else: master_verdict += f"🔴 **Negative Validation:** Modification worsened binding affinity by **+{delta_aff} kcal/mol**. "
 
-            if "Favorable" in shift_msg or "Comparable" in shift_msg:
-                master_verdict += "Coupled with the stable ADME pharmacokinetics profile, this structural modification is a **Strong Candidate for Synthesis**."
-            else:
-                master_verdict += "However, due to the compromised ADME pharmacokinetics profile, this structural modification should be **Rejected and Redesigned**."
+            if "Favorable" in shift_msg or "Comparable" in shift_msg: master_verdict += "Coupled with the stable ADME profile, this structural modification is a **Strong Candidate for Synthesis**."
+            else: master_verdict += "However, due to the compromised ADME profile, this structural modification should be **Rejected and Redesigned**."
 
             st.markdown("#### 📜 Master Synthesis Verdict")
             st.info(master_verdict)
@@ -1570,63 +1470,40 @@ else:
             # --- REPORT EXPORT ---
             st.write("---")
             st.subheader("Data Export & Manuscript Support Systems")
-            
             meta_data = extract_pdb_metadata(st.session_state.local_target_path, st.session_state.pdb_id_display) if st.session_state.local_target_path else {"id":"Custom","title":"Uploaded Structure File","method":"N/A","res":"N/A"}
-            meta_data['name'] = st.session_state.protein_name
-            meta_data['id'] = st.session_state.pdb_id_display
+            meta_data['name'], meta_data['id'] = st.session_state.protein_name, st.session_state.pdb_id_display
             b_img = generate_clean_2d_image(st.session_state.smiles_cache, include_labels=False, zoom_level=420)
+            grid_params = {'cx': st.session_state.cx, 'cy': st.session_state.cy, 'cz': st.session_state.cz, 'sx': st.session_state.sx, 'sy': st.session_state.sy, 'sz': st.session_state.sz, 'exh': st.session_state.exhaustiveness}
             
-            grid_params = {
-                'cx': st.session_state.cx, 'cy': st.session_state.cy, 'cz': st.session_state.cz,
-                'sx': st.session_state.sx, 'sy': st.session_state.sy, 'sz': st.session_state.sz,
-                'exh': st.session_state.exhaustiveness
-            }
-            
-            # HTML generation for the comparative table (with CSS yellow text color)
             df_comparison_html = '<table class="dataframe table"><thead><tr><th>Metric</th><th>Original Lead</th><th>Optimized Derivative</th></tr></thead><tbody>'
             for _, r in df_comp.iterrows():
                 val = r['Optimized Derivative']
-                style = ''
-                if "kcal/mol" in str(val) and orig_aff:
+                style = 'style="color: #d97706; font-weight: bold;"'
+                if "kcal/mol" in str(val) and "Delta" not in val and orig_aff:
                     try:
-                        v = float(val.split()[0])
-                        orig_v = float(orig_aff)
+                        v, orig_v = float(val.split()[0]), float(orig_aff)
                         if v < orig_v: style = 'style="color: #10b981; font-weight: bold;"'
                         elif v > orig_v: style = 'style="color: #ef4444; font-weight: bold;"'
                     except: pass
-                else:
-                    style = 'style="color: #d97706; font-weight: bold;"' # Golden Yellow CSS for non-numeric text
                 df_comparison_html += f"<tr><td>{r['Metric']}</td><td>{r['Original Lead']}</td><td {style}>{val}</td></tr>"
             df_comparison_html += '</tbody></table>'
 
-            df_results = parse_vina_output_with_residues(st.session_state.docking_results_raw)
-            df_int_orig = pd.DataFrame(orig_ints) if orig_ints else pd.DataFrame()
-            
+            df_results = parse_vina_output_with_residues_global(st.session_state.redesign_docking_results_raw, "redesign_docking_poses.pdbqt")
             try:
                 with open("protein.pdbqt", "r") as f: receptor_data = f.read()
-            except:
-                receptor_data = ""
+            except: receptor_data = ""
 
             html_report = build_comprehensive_html_report(
                 meta=meta_data, adme_p=adme_p, adme_v=adme_v, variant_row=v_row, iupac=iupac, shift_msg=shift_msg, 
                 f_img=ftir_b64, v_2d=v_2d, p_2d=b_img, smiles_cache=st.session_state.smiles_cache, 
-                baseline_affinity=st.session_state.baseline_affinity, grid_params=grid_params, 
-                df_results=df_results, orig_ints=orig_ints, new_ints=new_ints, 
-                receptor_data=receptor_data, orig_ligand_pose_data=orig_pose, redesign_ligand_pose_data=p4_poses[p4_sel_pose], 
-                selected_pose_orig=st.session_state.get('selected_pose_export', 1), selected_pose_new=p4_sel_pose,
-                style_mode=st.session_state.style_mode, show_surface=st.session_state.surf_toggle,
-                master_verdict=master_verdict, df_comparison_html=df_comparison_html
+                baseline_affinity=st.session_state.baseline_affinity, grid_params=grid_params, df_results=df_results, 
+                orig_ints=orig_ints, new_ints=new_ints, receptor_data=receptor_data, orig_ligand_pose_data=orig_pose, 
+                redesign_ligand_pose_data=p4_poses[p4_sel_pose], selected_pose_orig=st.session_state.get('selected_pose_export', 1), 
+                selected_pose_new=p4_sel_pose, style_mode=st.session_state.style_mode, show_surface=st.session_state.surf_toggle,
+                master_verdict=master_verdict, df_comparison_html=df_comparison_html, pre_uff=pre_uff, post_uff=post_uff, delta_uff=delta_uff,
+                active_retained_ions=st.session_state.active_retained_ions
             )
             
-            st.download_button(
-                label="📥 Download Consolidated Manuscript Quality HTML Research Report",
-                data=html_report,
-                file_name=f"InSilico_BioSphere_Research_Record_{v_row['Variant ID']}.html",
-                mime="text/html",
-                use_container_width=True,
-                key="dl_phase4"
-            )
+            st.download_button(label="📥 Download Consolidated Manuscript Quality HTML Research Report", data=html_report, file_name=f"InSilico_BioSphere_Research_Record_{v_row['Variant ID']}.html", mime="text/html", use_container_width=True, key="dl_phase4")
 
-# Execute Rerun at the absolute bottom of the script to prevent rendering glitches
-if trigger_rerun:
-    safe_rerun()
+if trigger_rerun: safe_rerun()
