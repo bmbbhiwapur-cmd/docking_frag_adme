@@ -1377,7 +1377,7 @@ with col_visual:
                     if res_list:
                         has_contacts = True
                         labels_joined = ", ".join(sorted(list(set(res_list))))
-                        breakdown_html += f"<p style='margin:4px 0; font-size:13px;'><b>{cat_name}:</b> <span style='color:#333;'>{labels_joined}</span></p>"
+                        breakdown_html += f"<p style='margin:4px 0; font-size:13px;'><b style='color:#000000;'>{cat_name}:</b> <span style='color:#333;'>{labels_joined}</span></p>"
                         report_breakdown_text += f"- {cat_name}: {labels_joined}\n"
                 if not has_contacts: 
                     breakdown_html = "<p style='margin:4px 0; color:#777; font-size:13px;'>No pocket interactions detected.</p>"
