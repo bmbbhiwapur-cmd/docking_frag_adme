@@ -432,14 +432,7 @@ def parse_vina_output_with_residues_global(stdout_text, docking_file="docking_po
                     if ints:
                         res_string = ", ".join(sorted(list(set([i["Residue Contact"] for i in ints]))))
                         bond_types = ", ".join(sorted(list(set([i["Interaction Type"] for i in ints]))))
-                data.append({
-                    "Binding Mode": mode_idx, 
-                    "Affinity (kcal/mol)": f"{aff:.2f}", 
-                    "RMSD l.b.": f"{rmsd_lb:.2f}", 
-                    "RMSD u.b.": f"{rmsd_ub:.2f}", 
-                    "Interacting Residues": res_string, 
-                    "Contact Bond Types": bond_types
-                })
+                data.append({"Binding Mode": mode_idx, "Affinity (kcal/mol)": aff, "RMSD l.b.": rmsd_lb, "RMSD u.b.": rmsd_ub, "Interacting Residues": res_string, "Contact Bond Types": bond_types})
             except ValueError: continue
     return pd.DataFrame(data)
 
@@ -744,7 +737,8 @@ def build_phase1_html_report(meta, p_2d, smiles_cache, grid_params, df_results_p
                 <div class="meta-item"><strong>Catalytic Cofactors Filter:</strong> {active_retained_ions}</div>
                 <div class="meta-item"><strong>Ligand (SMILES):</strong> <span style="word-break: break-all; font-family: monospace;">{smiles_cache}</span></div>
                 <div class="meta-item"><strong>Grid Search Strategy:</strong> {grid_strategy}</div>
-                <div class="meta-item"><strong>Grid Box (X,Y,Z / Dim):</strong> ({grid_params['cx']}, {grid_params['cy']}, {grid_params['cz']}) / {grid_params['sx']}×{grid_params['sy']}×{grid_params['sz']}</div>
+                <div class="meta-item"><strong>Grid Box (X,Y,Z):</strong> {grid_params['cx']}, {grid_params['cy']}, {grid_params['cz']}</div>
+                <div class="meta-item"><strong>Grid Dimensions (Å):</strong> {grid_params['sx']} × {grid_params['sy']} × {grid_params['sz']}</div>
             </div>
 
             <div style="text-align: center; margin-bottom: 20px;">
@@ -898,7 +892,7 @@ def build_comprehensive_html_report(meta, adme_p, adme_v, variant_row, iupac, sh
                 <div class="meta-item"><strong>Lead Phytochemical (SMILES):</strong> <span class="scandata">{smiles_cache}</span></div>
                 <div class="meta-item"><strong>Grid Search Strategy:</strong> {grid_strategy}</div>
                 <div class="meta-item"><strong>Grid Box Coordinates (X, Y, Z):</strong> {grid_params['cx']}, {grid_params['cy']}, {grid_params['cz']}</div>
-                <div class="meta-item"><strong>Grid Box Dimensions (Å):</strong> {grid_params['sx']} × {grid_params['sy']} × {grid_params['sz']}</div>
+                <div class="meta-item"><strong>Grid Dimensions (Å):</strong> {grid_params['sx']} × {grid_params['sy']} × {grid_params['sz']}</div>
                 <div class="meta-item"><strong>Search Exhaustiveness:</strong> {grid_params['exh']}</div>
             </div>
 
@@ -1139,6 +1133,27 @@ with col_params:
                 trigger_rerun = True
 
     if st.session_state.target_ready and st.session_state.local_target_path:
+        discovered_het = discover_and_list_all_heteroatoms(st.session_state.local_target_path)
+        if discovered_het:
+            st.markdown("#### 🧬 Catalytic Cofactors & Heteroatom Filter")
+            st.markdown("*Select structurally active ions/cofactors to keep in the grid pocket framework. Unchecked entries (like crystallization buffer debris) will be stripped.*")
+            
+            selected_hets = []
+            cols_het = st.columns(min(len(discovered_het), 4))
+            for idx, (het_id, count) in enumerate(discovered_het.items()):
+                with cols_het[idx % 4]:
+                    if st.checkbox(f"Keep {het_id} ({count})", value=False, key=f"keep_het_{het_id}"):
+                        selected_hets.append(het_id)
+                        
+            if st.button("🛠 Rebuild Clean Receptor Structure Matrix"):
+                ok, err = convert_pdb_to_pdbqt(st.session_state.local_target_path, "protein.pdbqt", is_ligand=False, allowed_heteroatoms=selected_hets)
+                if ok:
+                    st.session_state.active_retained_ions = ", ".join(selected_hets) if selected_hets else "None (Fully Stripped)"
+                    st.success(f"Receptor rebuilt successfully! Retained: {st.session_state.active_retained_ions}")
+                    st.session_state.detected_pockets = [] 
+                else:
+                    st.error(f"Receptor optimization failure: {err}")
+
         meta = extract_pdb_metadata(st.session_state.local_target_path, st.session_state.pdb_id_display)
         st.markdown(f"> **Protein Summary Profile:** \n> * **Protein Name:** **{st.session_state.protein_name}** \n> * **Title:** {meta['title']} \n> * **PDB ID:** `{st.session_state.pdb_id_display}` | **Classification:** {meta['class']} \n> * **Resolution:** **{meta['res']}**")
 
@@ -1195,7 +1210,7 @@ with col_params:
                         except: pass
                     
                     if not extracted_smiles:
-                        st.error("⚠️ RDKit could not deduce bond orders from the uploaded spatial coordinates. Phase 2 Generative Redesign requires a valid SMILES framework.")
+                        st.error("⚠️ RDKit could not deduce bond orders from the uploaded spatial coordinates.")
                         st.session_state.smiles_cache = ""
                     else:
                         st.session_state.smiles_cache = extracted_smiles 
